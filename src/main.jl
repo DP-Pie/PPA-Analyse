@@ -112,4 +112,13 @@ select!(df_clean, Not([:Istte,:Isttesn,:IstteSollte,:IsttrSolltr]))
 
 select!(df_clean, [:Teil, :TA, :Bezeichnung, :Aktivität, :RMNr, :rMenge, :Sollte, :IstteSek, :Solltrsek, :Isttrsek, :Zustand])
 
-CSV.write("C:\\Users\\chris\\PPA-Analyse\\PPA-BDE01_ab RMNr43000_Daniels_Spielwiese_20260903_clean.CSV", df_clean, writeheader=true)
+transform!(
+    df_clean,
+    [:IstteSek, :Isttrsek] =>
+        ByRow((a, b) ->
+            ismissing(a) || ismissing(b) ? missing : round(a + b,1)
+        ) =>
+        :tges
+) 
+
+CSV.write(save_file(), df_clean, writeheader=true)
