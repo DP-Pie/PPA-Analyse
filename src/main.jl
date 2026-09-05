@@ -1,8 +1,20 @@
 using Pkg
 
-Pkg.add("RobustModels")
-Pkg.add("LinRegOutliers")
-Pkg.add("JLD2")
+REQUIRED_PACKAGES = [
+    "NativeFileDialog",
+    "RobustModels",
+    "LinRegOutliers",
+    "DataFrames",
+    "CSV",
+    "GLMakie",
+    "JLD2",
+    "CairoMakie"
+]
+
+# Installiere fehlende Pakete
+for package in REQUIRED_PACKAGES
+    Base.find_package(package) === nothing && Pkg.add(package)
+end
 
 using NativeFileDialog
 using RobustModels
@@ -11,114 +23,162 @@ using DataFrames
 using CSV
 using GLMakie
 using JLD2
-
-function parse_menge(x)
-    if ismissing(x)
-        return missing
-    elseif x isa Integer
-        return x
-    elseif x isa Real
-        isinteger(x) || throw(ArgumentError("Keine ganze Zahl: $x"))
-        return Int(x)
-    end
-
-    s = strip(string(x))
-
-    isempty(s) && return missing
-
-    # Deutsches Format: 1.456,00 -> 1456.00
-    s = replace(s, "." => "", "," => ".")
-
-    wert = Int(round(parse(Float64, s)))
-
-    isfinite(wert) || throw(ArgumentError("Ungültiger Wert: $x"))
-    isinteger(wert) || throw(ArgumentError("Keine ganze Zahl: $x"))
-
-    return wert
-end
-
-function parse_float(x)
-    if ismissing(x)
-        return missing
-    elseif x isa Integer
-        return x
-    elseif x isa Real
-        isinteger(x) || throw(ArgumentError("Keine ganze Zahl: $x"))
-        return Int(x)
-    end
-
-    s = strip(string(x))
-
-    isempty(s) && return missing
-
-    # Deutsches Format: 1.456,00 -> 1456.00
-    s = replace(s, "." => "", "," => ".")
-
-    wert = round(parse(Float64, s), digits=1)
-
-    isfinite(wert) || throw(ArgumentError("Ungültiger Wert: $x"))
-
-    return wert
-end
-
+using CairoMakie
 df_path = pick_file(filterlist="*csv")
 df = CSV.read(df_path, DataFrame)
 
-# Daten Aufräumen
-df_clean = copy(df)
-# Teil von String31 in String convertieren
-transform!(df_clean, :Teil => ByRow(string) => :Teil)
-# Bezeichnungen zusammenfassen
+# Float-Werte korrekt anzeigen druch runden.
+transform!(df, :tges => ByRow(x -> round(x, digits=1)) => :tges)
+transform!(df, :Isttrsek => ByRow(x -> round(x, digits=1)) => :Isttrsek)
+
+# :Zustand von Nein/Ja in Boolean umwandeln.
 transform!(
-    df_clean,
-    [:Bezeichnung1, :Bezeichnung2, :Bezeichnung3, :Bezeichnung4] =>
-        ByRow((a, b, c, d) ->
-            join(skipmissing((a, b, c, d)), " ")
-        ) =>
-        :Bezeichnung
+    df,
+    :Zustand => ByRow(x ->
+        ismissing(x) ? missing :
+        lowercase(strip(string(x))) == "ja"
+    ) => :Zustand
 )
-# Bezeichnung1 bis 4 löschen
-select!(df_clean, Not([:Bezeichnung1, :Bezeichnung2, :Bezeichnung3, :Bezeichnung4]))
-# Aktivität von String31 zu String konvertieren
-transform!(df_clean, :Aktivität => ByRow(string) => :Aktivität)
-# von String31 zu Int konvertieren
-transform!(df_clean, :rMenge => ByRow(parse_menge) => :rMenge)
-transform!(df_clean, :Sollte => ByRow(parse_menge) => :Sollte)
-transform!(df_clean, :IstteSek => ByRow(parse_menge) => :IstteSek)
-transform!(df_clean, :Isttr => ByRow(parse_float) => :Isttr)
-# isttr in Sekunden umrechnen
-function in_sekunden(wert, einheit)
-    if ismissing(wert)
-        return missing
-    elseif !ismissing(einheit) &&
-           lowercase(strip(string(einheit))) == "min"
-        return wert * 60
-    else
-        return wert
-    end
+
+# Kontainer für die Regessionsmodelle und deren Daten
+@kwdef mutable struct RegressionsModell
+    name::String
+    stats::DataFrame #LOSS-Fkt, m, n, std_err, r2, p_value,...
+    points::DataFrame #x, y, y_hat, residuals
 end
 
-transform!(
-    df_clean,
-    [:Isttr, :ZEtr] => ByRow(in_sekunden) => :Isttrsek
+# Kontainer für das Teil mit all seinen Einträgen und den zugehörigen Regressionsdaten
+@kwdef mutable struct Teil
+    df::DataFrame
+    name::String
+    TA::Int64
+    Zustand::Bool # ja = true, nein = false
+    Bezeichnung::String
+    Aktivität::String
+    n::Int64
+    Soll_te::Float64
+    Soll_tr::Float64
+    RegressionsModell::Dict{String, RegressionsModell}
+end
+
+"""
+# Funktion zum Gruppieren der Daten nach Teil
+Gruppiert die Teile im Datafram nach Teil-Namen und erstellt dafür ein Dictonary mit einem Kontainer-Objekt.
+Dies beinhaltet die Daten des Teils, die Anzahl der Einträge, Sollwerte und die zugehörigen Regressionsmodelle.
+"""
+function erstelle_teile(df::DataFrame)
+    teile = Dict{String, Teil}()
+
+    # Teil = missing wird nicht als eigenes Teil verarbeitet
+    df_ohne_missing = dropmissing(df, :Teil)
+
+    for gruppe in groupby(df_ohne_missing, :Teil)
+        name = string(gruppe.Teil[1])
+        n = nrow(gruppe)
+
+        # Zeile mit der größten gültigen RMNr bestimmen
+        gueltig = findall(!ismissing, gruppe.RMNr)
+
+        isempty(gueltig) &&
+            throw(ArgumentError("Teil '$name' enthält keine gültige RMNr."))
+
+        lokal = gueltig[argmax(gruppe.RMNr[gueltig])]
+
+        # Nur die gewünschten Spalten im Teil-DataFrame speichern
+        daten = select(
+            DataFrame(gruppe),
+            [:RMNr, :rMenge, :IstteSek, :Isttrsek, :tges]
+        )
+
+        modelle = Dict{String, RegressionsModell}()
+
+        teile[name] = Teil(
+            df = daten,
+            name = name,
+            TA = Int(gruppe.TA[lokal]),
+            Zustand = Bool(gruppe.Zustand[lokal]),
+            Bezeichnung = String(gruppe.Bezeichnung[lokal]),
+            Aktivität = String(gruppe.Aktivität[lokal]),
+            n = n,
+            Soll_te = Float64(gruppe.Sollte[lokal]),
+            Soll_tr = Float64(gruppe.Solltrsek[lokal]),
+            RegressionsModell = modelle
+        )
+    end
+
+    return teile
+end
+
+Teiledict = erstelle_teile(df)
+
+sortierte_teile = sort(
+    collect(values(Teiledict)),
+    by = teil -> teil.n,
+    rev = true
 )
-transform!(
-    df_clean,
-    [:Solltr, :ZEtr] => ByRow(in_sekunden) => :Solltrsek
+
+anzahlen = [teil.n for teil in sortierte_teile]
+x = 1:length(anzahlen)
+
+farben = cgrad(
+    :viridis,
+    length(anzahlen),
+    categorical = true
 )
 
-select!(df_clean, Not([:Isttr, :Solltr, :ZEtr,:ZEte]))
-select!(df_clean, Not([:Istte,:Isttesn,:IstteSollte,:IsttrSolltr]))
+fig = Figure(size = (1000, 600))
+y_max = maximum(anzahlen) +10
+ax = Axis(
+    fig[1, 1],
+    xlabel = "Teile, absteigend sortiert",
+    ylabel = "Anzahl der Einträge",
+    title = "Eintragsverteilung der Teile",
 
-select!(df_clean, [:Teil, :TA, :Bezeichnung, :Aktivität, :RMNr, :rMenge, :Sollte, :IstteSek, :Solltrsek, :Isttrsek, :Zustand])
+    limits = (-10, 2600, 0, y_max),
+    xticks = 0:100:2600,
+    yticks = 0:10:y_max,
 
-transform!(
-    df_clean,
-    [:IstteSek, :Isttrsek] =>
-        ByRow((a, b) ->
-            ismissing(a) || ismissing(b) ? missing : round(a + b,1)
-        ) =>
-        :tges
-) 
+    backgroundcolor = :white
+)
 
-CSV.write(save_file(), df_clean, writeheader=true)
+barplot!(
+    ax,
+    x,
+    anzahlen;
+    colorrange = (1, max(length(x), 2)),
+    strokewidth = 0
+)
+
+gesamt = sum(anzahlen)
+maximalwert = maximum(anzahlen)
+anzahl_teile = length(anzahlen)
+prozent_bis_30 = 100 * count(anzahlen .<= 30) / anzahl_teile
+prozent_bis_20 = 100 * count(anzahlen .<= 20) / anzahl_teile
+prozent_bis_10 = 100 * count(anzahlen .<= 10) / anzahl_teile
+
+text!(
+    ax,
+    2550,
+    y_max * 0.95,
+    text = """
+Rückmeldungen gesamt: $gesamt
+EInträge je Teil: $anzahl_teile
+Maximalwert: $maximalwert
+
+Teile ≤ 30 Einträge: $(round(prozent_bis_30, digits=1)) %
+Teile ≤ 20 Einträge: $(round(prozent_bis_20, digits=1)) %
+Teile ≤ 10 Einträge: $(round(prozent_bis_10, digits=1)) %
+""",
+    align = (:right, :top),
+    fontsize = 16,
+    color = :black,
+    space = :data
+)
+fig
+
+CairoMakie.activate!()
+save("eintragsverteilung.svg", fig)
+vscodedisplay(df)
+
+@save "Teiledict.jld2" Teiledict
+@load "Teiledict.jld2" Teiledict
