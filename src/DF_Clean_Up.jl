@@ -120,12 +120,25 @@ select!(df_clean, Not([:Istte,:Isttesn,:IstteSollte,:IsttrSolltr]))
 select!(df_clean, [:Teil, :TA, :Bezeichnung, :Aktivität, :RMNr, :rMenge, :Sollte, :IstteSek, :Solltrsek, :Isttrsek, :Zustand])
 
 transform!(
-    df_clean,
+   ,
     [:IstteSek, :Isttrsek] =>
         ByRow((a, b) ->
-            ismissing(a) || ismissing(b) ? missing : round(a + b,1)
+            is df_cleanmissing(a) || ismissing(b) ? missing : round(a + b,1)
         ) =>
         :tges
 ) 
+
+# Float-Werte korrekt anzeigen druch runden.
+transform!(df_clean, :tges => ByRow(x -> round(x, digits=1)) => :tges)
+transform!(df_clean, :Isttrsek => ByRow(x -> round(x, digits=1)) => :Isttrsek)
+
+# :Zustand von Nein/Ja in Boolean umwandeln.
+transform!(
+    df_clean,
+    :Zustand => ByRow(x ->
+        ismissing(x) ? missing :
+        lowercase(strip(string(x))) == "ja"
+    ) => :Zustand
+)
 
 CSV.write(save_file(), df_clean, writeheader=true)
