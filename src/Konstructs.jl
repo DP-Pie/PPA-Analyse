@@ -67,21 +67,49 @@ function erstelle_teile(df::DataFrame)
     return teile
 end
 
-function liste_regressionsmodelle(teil::Teil)
+function truncate_float(x; digits=3)
+    s = string(x)
+    if occursin('.', s)
+        int_part, dec_part = split(s, '.')
+        if length(dec_part) > digits
+            return "$int_part.$(dec_part[1:digits])..."
+        end
+    end
+    return s
+end
+
+function liste_regressionsmodelle(teil::Teil, returnText::Bool = true, returnVec::Bool = false)
     if isempty(teil.RegressionsModell)
-        println("Für Teil '$(teil.name)' sind keine Regressionsmodelle gespeichert.")
+        if returnText == true
+            println("Für Teil '$(teil.name)' sind keine Regressionsmodelle gespeichert.")
+        end
         return nothing
     end
 
-    println("Regressionsmodelle für Teil: $(teil.name)")
+    Keynames = sort(collect(keys(teil.RegressionsModell))) # key gibt ein dict zurück, collect konvertiert es in einen Vektor
+    Modells = Vector{String}(undef, length(Keynames))
 
-    for (name, modell) in sort(collect(teil.RegressionsModell))
-        print("- ", name, ": ")
-        for col in names(modell.stats)[2:1:end]
-            print(col, " = ", modell.stats[1, col], ", ")
+    if returnText == true
+        println("Regressionsmodelle für Teil: $(teil.name)")
+    end
+
+    for (i, key) in enumerate(Keynames)
+        Modells[i] = key
+        if returnText == true
+            h_str = "    $(i): $(key): "
+            for col in names(teil.RegressionsModell[key].stats) 
+                h_val = truncate_float(teil.RegressionsModell[key].stats[1, col])
+                h_str *= "$(col)= $h_val, "
+            end
+            h_str *= "Messpunkte: $(nrow(teil.RegressionsModell[key].points))"
+            println(h_str)
         end
-        println("Punkte: ", nrow(modell.points))
+    end
+
+    if returnVec == true
+        return Modells
     end
 
     return nothing
 end
+

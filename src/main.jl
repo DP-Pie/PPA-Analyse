@@ -36,6 +36,7 @@ using StatsAPI
 include("Konstructs.jl")
 
 df_path = pick_file(filterlist="*csv")
+#df_path = "../PPA-BDE01_ab RMNr43000_Daniels_Spielwiese_20260903_clean.CSV"
 df = CSV.read(df_path, DataFrame)
 
 Teiledict = erstelle_teile(df)
@@ -43,175 +44,125 @@ Teiledict = erstelle_teile(df)
 # Diagramme anzeigen
 include("Diagrams.jl")
 # Anzahl der Einträge je Teil, absteigend sortiert
-Show_einträge()
+GLMakie.activate!(inline=false)
+show_einträge()
 
 # Speichern der Eintragsverteilung als SVG-Datei
 CairoMakie.activate!()
 save("eintragsverteilung.svg", fig)
 vscodedisplay(df)
 
-# Muss noch richtig implementiert werden, ersialisation und soweiter.
-#@save "Teiledict.jld2" Teiledict
-#@load "Teiledict.jld2" Teiledict
-function theil_sen_regression(
-    x::Vector{Int64},
-    y::Vector{Float64}
-)
-    x = Float64.(x)
-    return theil_sen_regression(x, y)
-end
-
-function theil_sen_regression(
-    x::Vector{Float64},
-    y::Vector{Float64}
-)
-    len = length(x)
-
-    # Überprüfen, ob die Vektoren die gleiche Länge haben
-    len != length(y) ? throw(ArgumentError("Die Vektoren x und y müssen die gleiche Länge haben.")) : nothing
-    # Überprüfen, ob die Vektoren mindestens zwei Elemente enthalten
-    len < 2 ? throw(ArgumentError("Die Vektoren x und y müssen mindestens zwei Elemente enthalten.")) : nothing
-
-    @inline m(x1::Float64, x2::Float64, y1::Float64, y2::Float64) = (y1 - y2) / (x1 - x2)
-
-    slopes = Float64[]
-
-    for i in 1:(len - 1)
-        for j in (i + 1):len
-            if x[i] != x[j]
-                slope = m(x[i], x[j], y[i], y[j])
-                push!(slopes, slope)
-            end
-        end
-    end
-
-    # Überprüft slopes auf leeren Inhalt.
-    isempty(slopes) ? throw(ArgumentError("Es gibt keine unterschiedlichen x-Werte.")) : nothing
-
-    slope = median(slopes)
-
-    intercepts = y .- slope .* x
-    intercept = median(intercepts)
-
-    y_hat = slope .* x .+ intercept
-    e = y .- y_hat
-
-    # Regressionsmodelldaten zusammenstellen
-    stats_df = DataFrame(
-        Regression = ["Theil-Sen"],
-        LOSS_Fkt = ["Median"],
-        m = [slope],
-        n = [intercept],
-        std_err = [NaN],
-        r2 = [NaN]
-        )
-    points_df = DataFrame(
-        x = x,
-        y = y,
-        y_hat = y_hat,
-        residuals = e
-    )
-    modell = RegressionsModell(
-        name = "Theil-Sen",
-        stats = stats_df,
-        points = points_df
-    )
-
-    return modell
-end
+include("Regressionen.jl")
 
 
-function mm_regression!( teil::Teil; min_n::Int = 10 )
-
-    daten = dropmissing(
-        select(teil.df, [:rMenge, :tges]),
-        [:rMenge, :tges]
-    )
-
-    if nrow(daten) <= min_n
-        return nothing
-    end
-
-    x = Float64.(daten.rMenge)
-    y = Float64.(daten.tges)
-
-    if length(unique(x)) < 2
-        throw(ArgumentError(
-            "Zu wenige unterschiedliche x-Werte für Teil $(teil.name)."
-        ))
-    end
-
-    regressionsdaten = DataFrame(
-        x = x,
-        y = y
-    )
-
-    modell_robust = RobustModels.rlm(
-        @formula(y ~ x),
-        regressionsdaten,
-        RobustModels.MMEstimator{RobustModels.TukeyLoss}();
-        σ0 = :mad
-    )
-
-    koeffizienten = StatsAPI.coef(modell_robust)
-    standardfehler = StatsAPI.stderror(modell_robust)
-
-    intercept = koeffizienten[1]
-    slope = koeffizienten[2]
-
-    y_hat = slope .* x .+ intercept
-    residuals = y .- y_hat
-
-    summe_quadrate = sum((y .- mean(y)) .^ 2)
-
-    r2 = if summe_quadrate == 0
-        NaN
-    else
-        1 - sum(residuals .^ 2) / summe_quadrate
-    end
-
-    stats_df = DataFrame(
-        Regression = ["MM"],
-        LOSS_Fkt = ["TukeyLoss"],
-        m = [slope],
-        std_err_m = [standardfehler[2]],
-        intercept = [intercept],
-        std_err_intercept = [standardfehler[1]],
-        n = [length(x)],
-        r2 = [r2]
-    )
-
-    points_df = DataFrame(
-        x = x,
-        y = y,
-        y_hat = y_hat,
-        residuals = residuals
-    )
-
-    modell = RegressionsModell(
-        name = "MM-Tukey",
-        stats = stats_df,
-        points = points_df
-    )
-
-    #teil.RegressionsModell["MM-Tukey"] = modell
-
-    return modell
-end
 
 # Theil-Sen Regression für jedes Teil durchführen, das mindestens 20 Einträge hat
 for (key,Teil) in Teiledict
-    if Teil.n >= 100
+    if Teil.n >= 95
         #println("$key hat $(Teil.n) Einträge.")
-        MyReg = theil_sen_regression(Teil.df.rMenge, Teil.df.tges)
-        println("Theil-Sen Regression für Teil $key: m = $(MyReg.stats.m[1]), n = $(MyReg.stats.n[1])")
-        Teil.RegressionsModell["Theil-Sen"] = MyReg
-        MyReg = mm_regression(Teil)
-        println("Theil-Sen Regression für Teil $key: m = $(MyReg.stats.m[1]), n = $(MyReg.stats.n[1])")
-        Teil.RegressionsModell["MM-Tukey"] = MyReg
+        # Regressionen durchführen
+        theil_sen_regression!(Teil)
+        mm_regression!(Teil)
+        # Regressionsdaten ausgeben, nur Text
+        liste_regressionsmodelle(Teil, true)
     end
 end 
 
-vscodedisplay(Teiledict["KK-SK343-75-AA-002"].df)
-Teiledict["KK-SK343-75-AA-002"].df.rMenge |> typeof
-liste_regressionsmodelle(Teiledict["KK-SK343-75-AA-002"])
+using Random
+
+# --><<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+# todo 
+function bootstrap(teil::Teil, foo::Function, B::Int64=1_000)
+    
+        daten = dropmissing(select(teil.df, [:rMenge, :tges]),[:rMenge, :tges])
+
+        if nrwo(daten) <= 20
+            throw(ArgumentError("Teil: $(teil.name) hat weniger als 20 Datenpunkte, Für die Bootstrap-Methode ungeeignet"))
+            return nothing
+        end
+
+        x = Float64.(daten.rMenge)
+        y = Float64.(daten.tges)
+
+        xlen = length(x)
+
+        idx = rand(1:xlen,xlen)
+
+        m_boot = Vector{Float64}(undef,B)
+        n_boot = Vector{Float64}(undef,B)
+
+        xrnd = x[idx]
+        yrnd = y[idx]
+
+        for i in 1:1:B    
+            myReg = foo(xrnd,yrnd)
+            m_boot[i] = myReg.stats.m[1]
+            n_boot[i] = myReg.stats.n[1]
+        end
+
+
+
+
+
+end
+
+# QDK...Quartilsdispersionskoeffizient 
+function QDK(Vec::Vector{Float64},MedianForm::Bool=ture)
+    Q1, Median, Q3 = quantile(Vec,[0.25,0.5,0.75])
+
+    if MedianForm == true
+        if Median == 0.0 
+            throw(DivisionByZero("Median der Daten ist Null. Berechnung nicht möglich."))
+        end
+        result = (Q3 - Q1) / Median
+    else
+        ∑Q = Q3 + Q3
+        if ∑Q == 0.0
+            throw(DivisionByZero("Summer der Datenquantile 3 und 1 ist Null. Berechnung nicht möglich."))          
+        end
+    end
+    return result
+end
+
+Teildictselection_u20 = Dict{String,Teil}()
+for (key,teil) in Teiledict
+    if teil.n < 20
+       Teildictselection_u20[teil.name] = teil
+    end
+end
+
+@save "Teiledict.jld2" Teiledict
+@save "Teildictselection_u20.jld2" Teildictselection_u20
+
+#Datenframe aus Selektion erstellen.
+teile_df = DataFrame(
+    Aktivität = [teil.Aktivität for teil in values(Teiledict)],
+    Teil = [teil.name for teil in values(Teiledict)],
+    n = [teil.n for teil in values(Teiledict)],
+    Bezeichnung = [teil.Bezeichnung for teil in values(Teiledict)]
+)
+#Datenframe sortieren 
+sort!( teile_df, [:Aktivität, :n, :Teil], rev = [false, true, false])
+
+insertcols!( teile_df, 1, :ID => 1:nrow(teile_df))
+
+#leere Spalte für die Gruppierung
+insertcols!( teile_df, :Gruppe => Vector{Union{Missing, String}}(missing, nrow(teile_df)))
+
+function gruppe_setzen!(
+    df::DataFrame,
+    von::Int,
+    bis::Int,
+    gruppe::String
+)
+    df[
+        (df.ID .>= von) .& (df.ID .<= bis),
+        :Gruppe
+    ] .= gruppe
+
+    return df
+end
+
+gruppe_setzen!(teile_df, 986, 992, "Modular-Kabel")
+
+CSV.write("PPA-BDE_Aktivitäten.csv", teile_df)
