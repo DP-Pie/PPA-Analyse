@@ -162,7 +162,81 @@ function gruppe_setzen!(
 
     return df
 end
+@load "Teildictselection_u20.jld2" Teildictselection_u20
+keys(Teildictselection_u20)
+teile_df = CSV.read("PPA-BDE_Aktivitäten.csv", DataFrame)
+vscodedisplay(teile_df)
+
+length(unique(teile_df.Aktivität)) #249
+verpackung_df = filter(:Aktivität => ==("Verpacken"), teile_df)
+vscodedisplay(verpackung_df)
 
 gruppe_setzen!(teile_df, 986, 992, "Modular-Kabel")
 
-CSV.write("PPA-BDE_Aktivitäten.csv", teile_df)
+
+### prefixselection richtig einpflegen
+function gruppe_aus_teil(teilname; usePrefix::String)
+    if ismissing(teilname)
+        return missing
+    end
+
+    teilname = string(teilname)
+
+    # teilnamee ignorieren, die mit zwei Buchstaben beginnen
+    if !startswith(teilname,usePrefix)
+        return missing
+    end
+
+    # Abschließendes T entfernen
+    teilname = replace(teilname, r"T$" => "")
+
+    # Ziffern am Ende suchen
+    match_result = match(r"(\d+)$", teilname)
+
+    # Keine Endziffern vorhanden
+    isnothing(match_result) && return missing
+
+    ziffern = match_result.captures[1]
+
+    # Die letzten vier Ziffern verwenden und links mit Nullen auffüllen
+    return lpad(last(ziffern, min(4, length(ziffern))), 4, '0')
+end
+
+function gruppe_aus_teil(teilname)
+    if ismissing(teilname)
+        return missing
+    end
+
+    teilname = string(teilname)
+
+    # teilnamee ignorieren, die mit zwei Buchstaben beginnen
+    if occursin(r"^[A-Za-z]{2}", teilname)
+        return missing
+    end
+
+    # Abschließendes T entfernen
+    teilname = replace(teilname, r"T$" => "")
+
+    # Ziffern am Ende suchen
+    match_result = match(r"(\d+)$", teilname)
+
+    # Keine Endziffern vorhanden
+    isnothing(match_result) && return missing
+
+    ziffern = match_result.captures[1]
+
+    # Die letzten vier Ziffern verwenden und links mit Nullen auffüllen
+    return lpad(last(ziffern, min(4, length(ziffern))), 4, '0')
+end
+
+for i in 1:nrow(teile_df)
+    if isequal(teile_df[i, :Aktivität], "Verpacken") &&
+       ismissing(teile_df[i, :Gruppe])
+
+        teile_df[i, :Gruppe] = gruppe_aus_teil(teile_df[i, :Teil])
+    end
+end
+
+vscodedisplay(teile_df)
+
+CSV.write("PPA-BDE_Aktivitäten2.csv", teile_df)

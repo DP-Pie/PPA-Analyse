@@ -99,7 +99,7 @@ function Theil_Sen_Core(x::Vector{Float64},y::Vector{Float64})
 
     y_hat = slope .* x .+ intercept
     e = y .- y_hat
-    retrun slope, intercept, e
+    return slope, intercept, e
 end
 
 # Robuste Regression mit MM-Estimator
