@@ -149,12 +149,7 @@ insertcols!( teile_df, 1, :ID => 1:nrow(teile_df))
 #leere Spalte für die Gruppierung
 insertcols!( teile_df, :Gruppe => Vector{Union{Missing, String}}(missing, nrow(teile_df)))
 
-function gruppe_setzen!(
-    df::DataFrame,
-    von::Int,
-    bis::Int,
-    gruppe::String
-)
+function gruppe_setzen!( df::DataFrame, von::Int, bis::Int, gruppe::String)
     df[
         (df.ID .>= von) .& (df.ID .<= bis),
         :Gruppe
@@ -162,9 +157,10 @@ function gruppe_setzen!(
 
     return df
 end
+
 @load "Teildictselection_u20.jld2" Teildictselection_u20
 keys(Teildictselection_u20)
-teile_df = CSV.read("PPA-BDE_Aktivitäten.csv", DataFrame)
+teile_df = CSV.read("PPA-BDE_Aktivitäten2.csv", DataFrame)
 vscodedisplay(teile_df)
 
 length(unique(teile_df.Aktivität)) #249
@@ -174,7 +170,7 @@ vscodedisplay(verpackung_df)
 gruppe_setzen!(teile_df, 986, 992, "Modular-Kabel")
 
 
-### prefixselection richtig einpflegen
+# ERweiterung um Gerätefamilie mit Prefixen zu gruppieren 
 function gruppe_aus_teil(teilname; usePrefix::String)
     if ismissing(teilname)
         return missing
@@ -199,7 +195,7 @@ function gruppe_aus_teil(teilname; usePrefix::String)
     ziffern = match_result.captures[1]
 
     # Die letzten vier Ziffern verwenden und links mit Nullen auffüllen
-    return lpad(last(ziffern, min(4, length(ziffern))), 4, '0')
+    return usePrefix * lpad(last(ziffern, min(4, length(ziffern))), 4, '0')
 end
 
 function gruppe_aus_teil(teilname)
@@ -237,6 +233,51 @@ for i in 1:nrow(teile_df)
     end
 end
 
+function gebe_aus_MZ(Bezeichnung::String)
+    matchresult = match(r"MZ-([^-]+)-([^-]+?)(?=[ ,.!?]|$)",Bezeichnung) #([^-]+)-([^-]+?)(?=[.,!?])($)
+
+    if matchresult !== nothing
+        return matchresult.match
+    else
+        return "missing"
+    end
+
+end
+
+gebe_aus_MZ("bli bla blub")
+
+transform!(teile_df, :Gruppe => ByRow(string) => :Gruppe)
+for i in 1:nrow(teile_df)
+    if teile_df[i, :Gruppe] == "missing"
+        teile_df[i, :Gruppe] = gebe_aus_MZ(teile_df[i, :Bezeichnung])
+    end
+end
+
 vscodedisplay(teile_df)
 
-CSV.write("PPA-BDE_Aktivitäten2.csv", teile_df)
+gruppe_df = combine( groupby( dropmissing(teile_df, :Gruppe), [:Aktivität, :Gruppe] ),
+    :Teil => (teile -> join(unique(string.(skipmissing(teile))), ", ")) => :Teile,
+    :n => (werte -> sum(skipmissing(werte))) => :n_gesamt
+)
+
+gruppe_df_noAktivity = combine( groupby( dropmissing(teile_df, :Gruppe), :Gruppe),
+    :n => sum => :n_gesamt,
+    :Teil => (teile -> join(unique(string.(teile)), ", ")) => :Teile
+)
+vscodedisplay(gruppe_df)
+vscodedisplay(gruppe_df_noAktivity)
+
+missing_df = filter(:Gruppe => ==("missing"), teile_df)
+missing_df = filter(:Aktivität => ==("Schlauch ablängen"), missing_df)
+
+# besser in PTFE gefunden ja dann wert PTFE_Wert ausgeben
+function Gruppe_Schlauch_länge(Bezeichnung::String)
+    matchresult = match( r"(?i)PTFE.*?Länge\s*=\s*([0-9]+(?:[.,][0-9]+)?)\s*mm",Bezeichnung) #([^a-zA-Z0-9,.!?=])Länge=([^0-9]mm
+    return matchresult
+end
+
+Gruppe_Schlauch_länge(missing_df.Bezeichnung[1])
+
+vscodedisplay(missing_df)
+
+CSV.write("PPA-BDE_Aktivitäten.csv", teile_df)
