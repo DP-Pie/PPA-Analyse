@@ -1,3 +1,6 @@
+"""
+# Präambel 
+"""
 using Pkg
 
 REQUIRED_PACKAGES = [
@@ -12,51 +15,74 @@ REQUIRED_PACKAGES = [
     "Statistics",
     "GLM",
     "StatsModels",
-    "StatsAPI"
-]
+    "StatsAPI",
+    "Random",
+    "Pluto"
+] 
+# "https://github.com/patrickm663/YeoJohnson.jl" ersetzte durch eigenen Funktion durch Hin- und Rücktransformation. 
+# using YeoJohnson            # Datentransformation für Heteroskedastizität (Variablenabhängige Streuung)
 
 # Installiere fehlende Pakete
 for package in REQUIRED_PACKAGES
     Base.find_package(package) === nothing && Pkg.add(package)
 end
 
-using NativeFileDialog
-using RobustModels
-using LinRegOutliers
-using DataFrames
-using CSV
-using GLMakie
-using JLD2
-using CairoMakie
-using Statistics
-using GLM
-using StatsModels
-using StatsAPI
+using NativeFileDialog      # komfortable Dateien öffnen und Speichern
+using RobustModels          # Regressionssammlung für robuste Statistik
+using LinRegOutliers        # Ausreißer Identifizierung
+using DataFrames            # Datenhandling
+using CSV                   # CSV-Datein-Handling
+using CairoMakie            # Plot Aufbereitung für Veröffentlichungen/PDFs/... 
+using GLMakie               # Interaktive Plots
+GLMakie.activate!(inline=false) # Bild in VSCodeConsole deaktivieren
+using JLD2                  # Speichern/Laden von eignen Structs und Datenstruckturen
+using Statistics            # Die wichtigsten statistischen Formeln
+#using GLM                   # Backbone für die tiefergehenede statistische Analysen und Regressionen 
+using StatsModels           # Bereitstehhen der "gewöhnlichen" Abstacktionen und Hilfsfunktionen zum spezifizieren, annähren und evaluieren von Modellen. 
+using StatsAPI              # Bündelt Statistische funktionen und soll Namespace-Konflikte vermeiden
+using Random                # Funktionserweiterung für den Zufallsgenerator
+using LinearAlgebra         # Matrixoperationen und anders mathematisches gedöns
+#using Pluto
+using Dates
 
-include("Konstructs.jl")
 
-df_path = pick_file(filterlist="*csv")
-#df_path = "../PPA-BDE01_ab RMNr43000_Daniels_Spielwiese_20260903_clean.CSV"
+include("Konstructs.jl")                # Kontainervariablen und deren Hilfsfunktionen
+include("Diagrams.jl")                  # Funktionen zur Datendarstellung
+include("TideyUpData.jl")               # Hilfsfunktionen zum bearbeiten von Datensätzen
+include("YeoJohnson_Transformation.jl") # Yeo-Johnson-Transformation: λ-Schätzung, Vorwärts/Rücktransformation
+include("Regressionsmethoden.jl")       # Funktionen für die Regressionenmethoden wie Theil Sen, MM, ...
+include("Regressionsvalidation.jl")     # Funktion zum Validieren des Regressionsmodells
+include("Ausreißer_Flags.jl")           # Flag-System zur Ausreißerklassifikation
+include("Montecarlo_Sim.jl")            # Montecarlo-Simulation zum Abschätzen des Pausenzeitfehlers
+include("whittaker_eiler_smoother.jl")  # Smoother/Filter ohne Verzögerung im Output
+
+
+"""
+----
+# Erstellen eines Sammlung aller Teil mit deren Einträge
+----
+Ausagngslage ist die CSV-Datei mit den RMNr. ab 43_000.
+Diese wurde vorher bereinigt. Das Vorgehen ist in "DF_Clean_Up.jl" zu lesen.
+Spätere Bearbeitungen für die Korrekturen der Aktivitäten und Gruppierungen werden leider lückenhaft und unsauber bzw. schlechter nachvollziehbar.
+Eine Volle Rekonstruktion des Vorgehens ist somit nicht möglich.
+Es bleibt die Arbeit mit dem Endergebnis. 
+
+"""
+#df_path = pick_file(filterlist="*csv")
+df_path = "PPA-BDE01_ab RMNr43000_Daniels_Spielwiese_20260903_clean.CSV"
 df = CSV.read(df_path, DataFrame)
+vscodedispaly(df)
 
 Teiledict = erstelle_teile(df)
-
-# Diagramme anzeigen
-include("Diagrams.jl")
-# Anzahl der Einträge je Teil, absteigend sortiert
-GLMakie.activate!(inline=false)
-show_einträge()
+@save "Teiledict.jld2" Teiledict
+@load "Teiledict.jld2" Teiledict
 
 # Speichern der Eintragsverteilung als SVG-Datei
 CairoMakie.activate!()
+fig = show_einträge(Teiledict)
 save("eintragsverteilung.svg", fig)
-vscodedisplay(df)
 
-include("Regressionen.jl")
-
-
-
-# Theil-Sen Regression für jedes Teil durchführen, das mindestens 20 Einträge hat
+# Theil-Sen Regression und MM-Regression für jedes Teil durchführen, das mindestens 95 Einträge hat
 for (key,Teil) in Teiledict
     if Teil.n >= 95
         #println("$key hat $(Teil.n) Einträge.")
@@ -68,216 +94,239 @@ for (key,Teil) in Teiledict
     end
 end 
 
-using Random
+# PTFE-Schlauch-Gruppe erstellen
+for i in 1:nrow(teile_df)
+    if isequal(teile_df[i, :Aktivität], "Schlauch ablängen") &&
+       isequal(teile_df[i, :Gruppe], "missing")
 
-# --><<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-# todo 
-function bootstrap(teil::Teil, foo::Function, B::Int64=1_000)
-    
-        daten = dropmissing(select(teil.df, [:rMenge, :tges]),[:rMenge, :tges])
-
-        if nrwo(daten) <= 20
-            throw(ArgumentError("Teil: $(teil.name) hat weniger als 20 Datenpunkte, Für die Bootstrap-Methode ungeeignet"))
-            return nothing
-        end
-
-        x = Float64.(daten.rMenge)
-        y = Float64.(daten.tges)
-
-        xlen = length(x)
-
-        idx = rand(1:xlen,xlen)
-
-        m_boot = Vector{Float64}(undef,B)
-        n_boot = Vector{Float64}(undef,B)
-
-        xrnd = x[idx]
-        yrnd = y[idx]
-
-        for i in 1:1:B    
-            myReg = foo(xrnd,yrnd)
-            m_boot[i] = myReg.stats.m[1]
-            n_boot[i] = myReg.stats.n[1]
-        end
-
-
-
-
-
-end
-
-# QDK...Quartilsdispersionskoeffizient 
-function QDK(Vec::Vector{Float64},MedianForm::Bool=ture)
-    Q1, Median, Q3 = quantile(Vec,[0.25,0.5,0.75])
-
-    if MedianForm == true
-        if Median == 0.0 
-            throw(DivisionByZero("Median der Daten ist Null. Berechnung nicht möglich."))
-        end
-        result = (Q3 - Q1) / Median
-    else
-        ∑Q = Q3 + Q3
-        if ∑Q == 0.0
-            throw(DivisionByZero("Summer der Datenquantile 3 und 1 ist Null. Berechnung nicht möglich."))          
-        end
+        teile_df[i, :Gruppe] = Gruppe_mit_Länge_erstellen(teile_df[i, :Bezeichnung],"PTFE","Länge=","mm")
     end
-    return result
 end
 
-Teildictselection_u20 = Dict{String,Teil}()
+for i in 1:nrow(df)
+    if isequal(df[i, :Aktivität], "Schlauch ablängen") &&
+       isequal(df[i, :Gruppe], "missing")
+
+        df[i, :Gruppe] = Gruppe_mit_Länge_erstellen(df[i, :Bezeichnung],"PTFE","Länge=","mm")
+    end
+end
+vscodedisplay(df)
+Teiledict = erstelle_teile(df)
+CSV.write("PPA-BDE01_ab RMNr43000_Daniels_Spielwiese_20260903_clean.CSV", df)
+
+# versuch einer Multiplen-Regression
+PTFEdict = Dict{String,Teil}()
+for (key,teil) in Teiledict # loop über ein Dictonary wird mit key-wert-Paaren bewerkstelligt, alternative For entry in value(Dict)
+    if startswith(teil.Gruppe,"PTFE")
+        PTFEdict[key] = teil
+    end
+end
+
+c = 0
+for teil in values(PTFEdict)
+    c += teil.n
+    println("$(teil.name): $(teil.n)")
+end
+c
+
+# Datensatz der PTFE-Schlauche mit Länge anlegen 
+PTFE_DF = DataFrame()  # Leerer DataFrame mit den Spalten von `teil.df`
+for (key, teil) in PTFEdict
+    h_df = copy(teil.df)  # Kopie erstellen, um Original nicht zu verändern
+    h_df[:, :Länge] .= parse(Float64, split(teil.Gruppe, "_")[2]) * 0.01 # Neue Spalte hinzufügen, Länge in Meter umrechnen
+    append!(PTFE_DF, h_df)  # Zeilen anhängen
+end
+
+nrow(PTFE_DF)
+
+filter!([:rMenge, :tges] => (n, t) -> (n <= 100) || (t >= 220), PTFE_DF)
+filter!([:tges] => t -> t < 60_000, PTFE_DF)
+
+# Soll_tr-Daten als Achsenabschnitt anlegen
+# Kopie + tges=0 in einem Schritt
+new_rows = copy(PTFE_DF[PTFE_DF.Isttrsek .> 0, :])
+new_rows.tges .= new_rows.Isttrsek
+new_rows.rMenge .= 0
+# Anhängen
+append!(PTFE_DF, new_rows)
+
+vscodedisplay(PTFE_DF)
+
+fig = Figure()
+ax = Axis3(fig[1, 1], aspect = (1, 1, 1),
+    xlabel = "Azahl",
+    ylabel = "Länge [m]",
+    zlabel = "tges [s]",
+    title = "PTFE-Schläuche: tges vs. nMenge je Länge"
+)
+bx = Axis(fig[1,2], xlabel = "Anzahl", ylabel = "Länge [m]", title = "Anzahl-Länge")
+cx = Axis(fig[2,1], xlabel = "Länge [m]", ylabel = "tges [s]", title = "Länge-tges")
+dx = Axis(fig[2,2], xlabel = "Anzahl", ylabel = "tges [s]", title = "Anzahl-tges")
+
+Label(Fig[0,:]," PTFE")
+# Gruppe nach Länge und plotte jede Gruppe mit eigenem Label
+scatter!(ax, PTFE_DF.rMenge, PTFE_DF.Länge, PTFE_DF.tges, markersize = 5 )
+scatter!(bx, PTFE_DF.rMenge, PTFE_DF.Länge, markersize = 5 )
+scatter!(cx, PTFE_DF.Länge, PTFE_DF.tges, markersize = 5 )
+scatter!(dx, PTFE_DF.rMenge, PTFE_DF.tges, markersize = 5 )
+
+fig
+
+PTFEdict["10-0392m"].df
+
+Regressions_df = DataFrame( y = PTFE_DF.tges, n = PTFE_DF.rMenge, l = PTFE_DF.Länge)
+
+modell_robust = RobustModels.rlm(
+    @formula(y ~ n + n&l ),
+    Regressions_df,
+    RobustModels.MMEstimator{RobustModels.TukeyLoss}();
+    σ0 = :mad,
+    maxiter = 1000
+)
+
+# Gegenchecken wie gut das Modell bei den Top 3 Abschneidet.
+DataFrame(StatsAPI.coeftable(modell_robust))
+
+# Extrahiere die Koeffizienten aus dem Modell
+coefs = StatsAPI.coef(modell_robust)
+intercept = coefs[1]  # Intercept
+b_n       = coefs[2]  # n
+b_nl      = coefs[3]  # n*l
+
+# Erstelle die Figur
+fig = Figure(size = (800, 600))
+ax = Axis3(fig[1, 1],
+    xlabel = "n (Menge)",
+    ylabel = "l (Länge in m)",
+    zlabel = "y (Zeit in s)",
+    title = "Regressionsfläche: y = $(round(intercept; digits=2)) + $(round(b_n; digits=2))·n + $(round(b_nl; digits=2))·n·l",
+)
+
+# 1. Datenpunkte (Scatter)
+scatter!(ax, PTFE_DF.rMenge, PTFE_DF.Länge, PTFE_DF.tges,
+    markersize = 4,
+    color = :blue,
+    label = "Datenpunkte",
+    transparency = true
+)
+
+# 2. Berechne ein Gitter für die Fläche
+n_min, n_max = minimum(PTFE_DF.rMenge), maximum(PTFE_DF.rMenge)
+l_min, l_max = minimum(PTFE_DF.Länge), maximum(PTFE_DF.Länge)
+
+n_range = range(n_min, n_max, length=50)
+l_range = range(l_min, l_max, length=50)
+
+# 3. Berechne die Regressionsfläche
+z_matrix = [intercept + b_n*n + b_nl*n*l for n in n_range, l in l_range]
+
+# 4. Plotte die Fläche (Surface)
+surface!(ax, n_range, l_range, z_matrix,
+    colormap = :viridis,
+    transparency = false,
+    label = "Regressionsfläche"
+)
+
+# 5. Optional: Drahtgitter für bessere 3D-Wahrnehmung
+wireframe!(ax, n_range, l_range, z_matrix,
+    color = :black,
+    linewidth = 0.3,
+    transparency = true
+)
+
+
+Gruppen_df = combine(groupby(Aktivitäten_df, :Gruppe), :n => sum)
+sort!(Gruppen_df,:n_sum, rev = true)
+vscodedisplay(Gruppen_df)
+
+
+n_max = maximum([teil.n for (key,teil) in Teiledict])
+
 for (key,teil) in Teiledict
-    if teil.n < 20
-       Teildictselection_u20[teil.name] = teil
+    if teil.n == 108 
+        println(key)
+        break
     end
 end
 
-@save "Teiledict.jld2" Teiledict
-@save "Teildictselection_u20.jld2" Teildictselection_u20
+mm_regression!(Teiledict["KK-SK343-75-AA-002"])
 
-#Datenframe aus Selektion erstellen.
-teile_df = DataFrame(
-    Aktivität = [teil.Aktivität for teil in values(Teiledict)],
-    Teil = [teil.name for teil in values(Teiledict)],
-    n = [teil.n for teil in values(Teiledict)],
-    Bezeichnung = [teil.Bezeichnung for teil in values(Teiledict)]
-)
-#Datenframe sortieren 
-sort!( teile_df, [:Aktivität, :n, :Teil], rev = [false, true, false])
+ausreißer_flags_setzen!(Teiledict["KK-SK343-75-AA-002"])
 
-insertcols!( teile_df, 1, :ID => 1:nrow(teile_df))
+vscodedisplay(Teiledict["KK-SK343-75-AA-002"].df)
 
-#leere Spalte für die Gruppierung
-insertcols!( teile_df, :Gruppe => Vector{Union{Missing, String}}(missing, nrow(teile_df)))
+StatsModels.termvars(@formula(tges ~ rMenge))
 
-function gruppe_setzen!( df::DataFrame, von::Int, bis::Int, gruppe::String)
-    df[
-        (df.ID .>= von) .& (df.ID .<= bis),
-        :Gruppe
-    ] .= gruppe
+test_df, Mpkt, Aus, Auspro = PrepareData!(Teiledict["KK-SK343-75-AA-002"])
 
-    return df
-end
+theil_sen_regression!(Teiledict["KK-SK343-75-AA-002"])
+liste_regressionsmodelle(Teiledict["KK-SK343-75-AA-002"])
 
-@load "Teildictselection_u20.jld2" Teildictselection_u20
-keys(Teildictselection_u20)
-teile_df = CSV.read("PPA-BDE_Aktivitäten2.csv", DataFrame)
-vscodedisplay(teile_df)
+fig = Figure()
+ax = Axis(fig[1,1])
+scatter!(ax,Teiledict["KK-SK343-75-AA-002"].RegressionsModell["Theil-Sen"].points.y_hat,Teiledict["KK-SK343-75-AA-002"].RegressionsModell["Theil-Sen"].points.residuals)
 
-length(unique(teile_df.Aktivität)) #249
-verpackung_df = filter(:Aktivität => ==("Verpacken"), teile_df)
-vscodedisplay(verpackung_df)
+fig
 
-gruppe_setzen!(teile_df, 986, 992, "Modular-Kabel")
+# Pass 1: λ auf Rohdaten schätzen, Spalte anlegen, Ausreißer identifizieren
+λ̂ = yeo_johnson_auf_teil!(Teiledict["KK-SK343-75-AA-002"])
+mod = theil_sen_regression!(Teiledict["KK-SK343-75-AA-002"], FORMELN[:yeojohnson])
+
+# Pass 2: λ auf den OK-Punkten NEU schätzen und final fitten
+λ̂ = yeo_johnson_auf_teil!(Teiledict["KK-SK343-75-AA-002"]; λ = yeo_johnson_λ(yeo_johnson_inv(mod.points.y, λ̂)))
+mod = theil_sen_regression!(Teiledict["KK-SK343-75-AA-002"], FORMELN[:yeojohnson])
+
+# Vorhersagen zurück auf Sekunden:
+y_hat_sekunden = yeo_johnson_inv(mod.points.y_hat, λ̂)
+
+koef = StatsAPI.coef(mod.modell)          # [n, m] auf YJ-Skala
+
+yeo_johnson_vorhersage(koef, λ̂, Teiledict["KK-SK343-75-AA-002"].df.rMenge)        # Medianzeit t̂(x) in Sekunden
+yeo_johnson_achsenabschnitt(koef, λ̂)     # = t̂(0), das Originalskalen-Pendant zu n
+yeo_johnson_steigungen(koef, λ̂, Teiledict["KK-SK343-75-AA-002"].df.rMenge)        # lokale Steigung dy/dx in s/Stück an Stelle x
+
+yeo_johnson_vorhersage(koef, λ̂, 0:0.5:110)
 
 
-# ERweiterung um Gerätefamilie mit Prefixen zu gruppieren 
-function gruppe_aus_teil(teilname; usePrefix::String)
-    if ismissing(teilname)
-        return missing
-    end
+fig = Figure()
+cx = Axis(fig[1,1],limits = ((0, 80), nothing))
 
-    teilname = string(teilname)
+scatter!(cx, Teiledict["KK-SK343-75-AA-002"].df.rMenge, Teiledict["KK-SK343-75-AA-002"].df.tges)
+lines!(cx,(0:0.5:70), yeo_johnson_vorhersage(koef, λ̂, 0:0.5:70))
+ax = Axis(fig[2,1], yscale = log, limits = ((0, 80), nothing))
+scatter!(ax, Teiledict["KK-SK343-75-AA-002"].df.rMenge, Teiledict["KK-SK343-75-AA-002"].df.tges)
+lines!(ax,(0:0.5:70), yeo_johnson_vorhersage(koef, λ̂, 0:0.5:70))
+bx = Axis(fig[3,1],limits = ((0, 80), nothing))
+density!(bx,Teiledict["KK-SK343-75-AA-002"].RegressionsModell["Theil-Sen"].points.x)
+linkxaxes!(cx,bx,ax)
+fig
 
-    # teilnamee ignorieren, die mit zwei Buchstaben beginnen
-    if !startswith(teilname,usePrefix)
-        return missing
-    end
+yeo_johnson_steigungen(koef, λ̂, [median(Teiledict["KK-SK343-75-AA-002"].df.rMenge)]) 
 
-    # Abschließendes T entfernen
-    teilname = replace(teilname, r"T$" => "")
+median(Teiledict["KK-SK343-75-AA-002"].df.rMenge)
 
-    # Ziffern am Ende suchen
-    match_result = match(r"(\d+)$", teilname)
+mm_regression!(Teiledict["KK-SK343-75-AA-002"])
+Teiledict["KK-SK343-75-AA-002"].RegressionsModell["MM-Tukey"].stats
+Teiledict["KK-SK343-75-AA-002"].RegressionsModell["MM-Tukey"].points
+theil_sen_regression_yj!(Teiledict["KK-SK343-75-AA-002"])
 
-    # Keine Endziffern vorhanden
-    isnothing(match_result) && return missing
 
-    ziffern = match_result.captures[1]
+# Pass 1: λ auf Rohdaten schätzen, Spalte anlegen, Ausreißer identifizieren
+λ̂ = yeo_johnson_auf_teil!(Teiledict["KK-SK343-75-AA-002"])
+mod = mm_regression!(Teiledict["KK-SK343-75-AA-002"], FORMELN[:yeojohnson])
 
-    # Die letzten vier Ziffern verwenden und links mit Nullen auffüllen
-    return usePrefix * lpad(last(ziffern, min(4, length(ziffern))), 4, '0')
-end
+# Pass 2: λ auf den OK-Punkten NEU schätzen und final fitten
+λ̂ = yeo_johnson_auf_teil!(Teiledict["KK-SK343-75-AA-002"]; λ = yeo_johnson_λ(yeo_johnson_inv(mod.points.y, λ̂)))
+mod = mm_regression!(Teiledict["KK-SK343-75-AA-002"], FORMELN[:yeojohnson])
 
-function gruppe_aus_teil(teilname)
-    if ismissing(teilname)
-        return missing
-    end
+liste_regressionsmodelle(Teiledict["KK-SK343-75-AA-002"])
+diagnostik!(Teiledict["KK-SK343-75-AA-002"].RegressionsModell["Theil-Sen"])
+bewerte_diagnostik!(Teiledict["KK-SK343-75-AA-002"].RegressionsModell["Theil-Sen"])
+vscodedisplay(Teiledict["KK-SK343-75-AA-002"].RegressionsModell["Theil-Sen"].Diagnostik)
 
-    teilname = string(teilname)
+mm_regression!(Teiledict["KK-SK343-75-AA-002"])
+liste_regressionsmodelle(Teiledict["KK-SK343-75-AA-002"])
 
-    # teilnamee ignorieren, die mit zwei Buchstaben beginnen
-    if occursin(r"^[A-Za-z]{2}", teilname)
-        return missing
-    end
-
-    # Abschließendes T entfernen
-    teilname = replace(teilname, r"T$" => "")
-
-    # Ziffern am Ende suchen
-    match_result = match(r"(\d+)$", teilname)
-
-    # Keine Endziffern vorhanden
-    isnothing(match_result) && return missing
-
-    ziffern = match_result.captures[1]
-
-    # Die letzten vier Ziffern verwenden und links mit Nullen auffüllen
-    return lpad(last(ziffern, min(4, length(ziffern))), 4, '0')
-end
-
-for i in 1:nrow(teile_df)
-    if isequal(teile_df[i, :Aktivität], "Verpacken") &&
-       ismissing(teile_df[i, :Gruppe])
-
-        teile_df[i, :Gruppe] = gruppe_aus_teil(teile_df[i, :Teil])
-    end
-end
-
-function gebe_aus_MZ(Bezeichnung::String)
-    matchresult = match(r"MZ-([^-]+)-([^-]+?)(?=[ ,.!?]|$)",Bezeichnung) #([^-]+)-([^-]+?)(?=[.,!?])($)
-
-    if matchresult !== nothing
-        return matchresult.match
-    else
-        return "missing"
-    end
-
-end
-
-gebe_aus_MZ("bli bla blub")
-
-transform!(teile_df, :Gruppe => ByRow(string) => :Gruppe)
-for i in 1:nrow(teile_df)
-    if teile_df[i, :Gruppe] == "missing"
-        teile_df[i, :Gruppe] = gebe_aus_MZ(teile_df[i, :Bezeichnung])
-    end
-end
-
-vscodedisplay(teile_df)
-
-gruppe_df = combine( groupby( dropmissing(teile_df, :Gruppe), [:Aktivität, :Gruppe] ),
-    :Teil => (teile -> join(unique(string.(skipmissing(teile))), ", ")) => :Teile,
-    :n => (werte -> sum(skipmissing(werte))) => :n_gesamt
-)
-
-gruppe_df_noAktivity = combine( groupby( dropmissing(teile_df, :Gruppe), :Gruppe),
-    :n => sum => :n_gesamt,
-    :Teil => (teile -> join(unique(string.(teile)), ", ")) => :Teile
-)
-vscodedisplay(gruppe_df)
-vscodedisplay(gruppe_df_noAktivity)
-
-missing_df = filter(:Gruppe => ==("missing"), teile_df)
-missing_df = filter(:Aktivität => ==("Schlauch ablängen"), missing_df)
-
-# besser in PTFE gefunden ja dann wert PTFE_Wert ausgeben
-function Gruppe_Schlauch_länge(Bezeichnung::String)
-    matchresult = match( r"(?i)PTFE.*?Länge\s*=\s*([0-9]+(?:[.,][0-9]+)?)\s*mm",Bezeichnung) #([^a-zA-Z0-9,.!?=])Länge=([^0-9]mm
-    return matchresult
-end
-
-Gruppe_Schlauch_länge(missing_df.Bezeichnung[1])
-
-vscodedisplay(missing_df)
-
-CSV.write("PPA-BDE_Aktivitäten.csv", teile_df)
+diagnostik!(Teiledict["KK-SK343-75-AA-002"].RegressionsModell["MM-Tukey"])
+bewerte_diagnostik!(Teiledict["KK-SK343-75-AA-002"].RegressionsModell["MM-Tukey"])
+vscodedisplay(Teiledict["KK-SK343-75-AA-002"].RegressionsModell["MM-Tukey"].Diagnostik)
