@@ -16,6 +16,8 @@ REQUIRED_PACKAGES = [
     "GLM",
     "StatsModels",
     "StatsAPI",
+    "MixedModels",
+    "CategoricalArrays",
     "Random",
     "Pluto"
 ] 
@@ -40,6 +42,8 @@ using Statistics            # Die wichtigsten statistischen Formeln
 #using GLM                   # Backbone für die tiefergehenede statistische Analysen und Regressionen 
 using StatsModels           # Bereitstehhen der "gewöhnlichen" Abstacktionen und Hilfsfunktionen zum spezifizieren, annähren und evaluieren von Modellen. 
 using StatsAPI              # Bündelt Statistische funktionen und soll Namespace-Konflikte vermeiden
+using MixedModels           # Lineare gemischte Modelle
+using CategoricalArrays     # Kategoriale Gruppierungsvariablen
 using Random                # Funktionserweiterung für den Zufallsgenerator
 using LinearAlgebra         # Matrixoperationen und anders mathematisches gedöns
 #using Pluto
@@ -330,3 +334,75 @@ liste_regressionsmodelle(Teiledict["KK-SK343-75-AA-002"])
 diagnostik!(Teiledict["KK-SK343-75-AA-002"].RegressionsModell["MM-Tukey"])
 bewerte_diagnostik!(Teiledict["KK-SK343-75-AA-002"].RegressionsModell["MM-Tukey"])
 vscodedisplay(Teiledict["KK-SK343-75-AA-002"].RegressionsModell["MM-Tukey"].Diagnostik)
+
+# BeiPackDaten laden
+BP_df = CSV.read("BeiPackTeile.CSV", DataFrame)
+# leere Dicter stellen
+BPdict = Dict{String,Dict}()
+# Dictonary der Beipackteile mit den Materialien und deren Anzahl füllen
+for i in 1:nrow(BP_df)
+    BeiPack = Dict{String,Int64}()
+    BPstr = split(BP_df[i, :Material], ",")
+    for bp in BPstr
+        bp_split = split(bp, "x")
+        BeiPack[bp_split[2]] = parse(Int64, bp_split[1])
+    end
+    BPdict[BP_df[i,1]] = BeiPack
+end
+
+# Dataframe mit allen Materialien erstellen, die in den Beipackteilen vorkommen
+# Lister der Materilien erstllen
+c_unique = Dict{String,Bool}()
+for (key,Material) in BPdict
+    for (mkey, BeiPack) in Material
+        c_unique[mkey] = true
+    end
+end
+# Materialien alphabetisch sortieren
+c_unique_sorted = c_unique |> keys |> collect |> sort
+# DataFrame für die Beipackteile erstellen
+BP_df_long = DataFrame(BP = String.(BP_df[:, 1]))
+for material in c_unique_sorted
+    BP_df_long[!, Symbol(material)] = zeros(Int, nrow(BP_df_long))
+end
+
+# DataFrame mit Materialmengen je Beipackteil füllen
+bp_zeile = Dict(bp => i for (i, bp) in enumerate(BP_df_long.BP))
+for (bp, materialien) in BPdict
+    i = bp_zeile[bp]
+    for (material, anzahl) in materialien
+        BP_df_long[i, Symbol(material)] = anzahl
+    end
+end
+
+# Anzahl der Materialien je Beipackteil ermitteln
+BP_df_long[!, :n] = [length(BPdict[bp]) for bp in BP_df_long.BP]
+
+vscodedisplay(BP_df_long)
+CSV.write("BeiPackTeile_long.CSV", BP_df_long)
+
+BPTeiledict = Dict{String,Teil}()
+
+for (key,teil) in Teiledict
+    if startswith(teil.name, "BP")
+        BPTeiledict[key] = teil
+    end
+end
+
+bp_dfs = DataFrame[]
+
+for (bp, teil) in BPTeiledict
+    df = copy(teil.df)
+    df[!, :BP] = fill(bp, nrow(df))
+    push!(bp_dfs, df)
+end
+
+BP_records = vcat(bp_dfs...; cols = :union)
+BP_df_gesamt = leftjoin(BP_records, BP_df_long; on = :BP)
+BP_df_gesamt[!, :BP] = categorical(BP_df_gesamt.BP)
+
+modell = MixedModels.fit(
+    MixedModel,
+    @formula(tges ~ 1 + n + (1 | BP)),
+    BP_df_gesamt
+)
