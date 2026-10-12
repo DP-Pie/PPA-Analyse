@@ -16,8 +16,6 @@ REQUIRED_PACKAGES = [
     "GLM",
     "StatsModels",
     "StatsAPI",
-    "MixedModels",
-    "CategoricalArrays",
     "Random",
     "Pluto"
 ] 
@@ -42,8 +40,6 @@ using Statistics            # Die wichtigsten statistischen Formeln
 #using GLM                   # Backbone für die tiefergehenede statistische Analysen und Regressionen 
 using StatsModels           # Bereitstehhen der "gewöhnlichen" Abstacktionen und Hilfsfunktionen zum spezifizieren, annähren und evaluieren von Modellen. 
 using StatsAPI              # Bündelt Statistische funktionen und soll Namespace-Konflikte vermeiden
-using MixedModels           # Lineare gemischte Modelle
-using CategoricalArrays     # Kategoriale Gruppierungsvariablen
 using Random                # Funktionserweiterung für den Zufallsgenerator
 using LinearAlgebra         # Matrixoperationen und anders mathematisches gedöns
 #using Pluto
@@ -366,32 +362,37 @@ for material in c_unique_sorted
     BP_df_long[!, Symbol(material)] = zeros(Int, nrow(BP_df_long))
 end
 
-# DataFrame mit Materialmengen je Beipackteil füllen
-bp_zeile = Dict(bp => i for (i, bp) in enumerate(BP_df_long.BP))
-for (bp, materialien) in BPdict
-    i = bp_zeile[bp]
+#Dateframe mit den Beipackteilen und deren Materialien füllen
+for (i,(bp, materialien)) in enumerate(BPdict)
+    h_vec = bp
+    h_vec2 = repeat([0], length(c_unique_sorted))
+    h_vec = vcat(h_vec, h_vec2)
+    push!(BP_df_long, h_vec)
     for (material, anzahl) in materialien
         BP_df_long[i, Symbol(material)] = anzahl
     end
 end
 
 # Anzahl der Materialien je Beipackteil ermitteln
-BP_df_long[!, :n] = [length(BPdict[bp]) for bp in BP_df_long.BP]
+BP_df_long.n .= 0
+for (i,key) in enumerate(BP_df_long.BP)
+    BP_df_long[i, :n] = BPdict[key] |> length
+end
 
 vscodedisplay(BP_df_long)
 CSV.write("BeiPackTeile_long.CSV", BP_df_long)
 
-BPTeiledict = Dict{String,Teil}()
+BPdict = Dict{String,Teil}()
 
 for (key,teil) in Teiledict
     if startswith(teil.name, "BP")
-        BPTeiledict[key] = teil
+        BPdict[key] = teil
     end
 end
 
 bp_dfs = DataFrame[]
 
-for (bp, teil) in BPTeiledict
+for (bp, teil) in BPdict
     df = copy(teil.df)
     df[!, :BP] = fill(bp, nrow(df))
     push!(bp_dfs, df)
@@ -399,10 +400,162 @@ end
 
 BP_records = vcat(bp_dfs...; cols = :union)
 BP_df_gesamt = leftjoin(BP_records, BP_df_long; on = :BP)
+nrow(BP_df_gesamt)
+
+# Lange Formel erstellen
+bp_predictoren = Symbol.(names(BP_df_gesamt)[7:end])
+filter!(spalte -> spalte ∉ (:n, :rMenge), bp_predictoren)
+
+bp_rhs = reduce(
+    +,
+    StatsModels.term.(bp_predictoren);
+    init = StatsModels.term(:n) + StatsModels.term(:rMenge)
+)
+
+bp_formel = StatsModels.term(:tges) ~ bp_rhs
+
+#Missing entfernen 
+dropmissing!(BP_df_gesamt)
+vscodedisplay(BP_df_gesamt) 
+for spalte in names(BP_df_gesamt)[7:end]
+    BP_df_gesamt[!, spalte] = Int64.(BP_df_gesamt[!, spalte])
+end
+
+modell = RobustModels.rlm(
+    bp_formel,
+    BP_df_gesamt,
+    RobustModels.MEstimator{RobustModels.TukeyLoss}();
+    σ0 = :mad,
+    maxiter = 1000
+)
+
+fig = Figure()
+ax = Axis(fig[1, 1], xlabel = "rMenge", ylabel = "tges")
+
+palette = Makie.wong_colors()
+
+for (i, gruppe) in enumerate(groupby(BP_df_gesamt, :BP))
+    bp = string(gruppe.BP[1])
+    farbe = palette[mod1(i, length(palette))]
+
+    scatter!(
+        ax,
+        gruppe.rMenge,
+        gruppe.tges;
+        color = farbe,
+        label = bp
+    )
+
+    text!(
+        ax,
+        gruppe.rMenge,
+        gruppe.tges;
+        text = fill(bp, nrow(gruppe)),
+        color = farbe,
+        align = (:left, :bottom),
+        fontsize = 10
+    )
+end
+
+axislegend(ax, title = "BP")
+fig
+
+using MixedModels
+using CategoricalArrays
+using StatsModels
+
 BP_df_gesamt[!, :BP] = categorical(BP_df_gesamt.BP)
 
 modell = MixedModels.fit(
     MixedModel,
-    @formula(tges ~ 1 + n + (1 | BP)),
+    @formula(tges ~ 1 + n + rMenge + (1 | BP)),
     BP_df_gesamt
 )
+
+bp_levels = levels(BP_df_gesamt.BP)
+bp_random_intercepts = vec(MixedModels.ranef(modell)[1])
+fixed_effects = MixedModels.fixef(modell)
+
+bp_koeffizienten = DataFrame(
+    BP = bp_levels,
+    zufaelliger_Interzept = bp_random_intercepts,
+    Interzept = fixed_effects[1] .+ bp_random_intercepts,
+    Steigung_n = fill(fixed_effects[2], length(bp_levels))
+)
+
+vscodedisplay(bp_koeffizienten)
+
+modell = MixedModels.fit(
+    MixedModel,
+    @formula(tges ~ 1 + n + rMenge + (1 + n + rMenge | BP)),
+    BP_df_gesamt
+)
+
+modell = MixedModels.fit(
+    MixedModel,
+    @formula(tges ~ 1 + rMenge + (1 + rMenge | BP)),
+    BP_df_gesamt
+)
+
+bp_re = DataFrame(only(MixedModels.raneftables(modell)))
+beta = MixedModels.fixef(modell)
+
+bp_koeffizienten = DataFrame(
+    BP = bp_re.BP,
+    Interzept = beta[1] .+ bp_re[!, Symbol("(Intercept)")],
+    Steigung_rMenge = beta[2] .+ bp_re[!, :rMenge]
+)
+
+vscodedisplay(bp_koeffizienten)
+
+residuen = MixedModels.residuals(modell)
+vorhersagen = MixedModels.fitted(modell)
+
+fig = Figure()
+ax = Axis(
+    fig[1, 1],
+    xlabel = "Vorhergesagte tges",
+    ylabel = "Residuen",
+    title = "Residuen nach BP-Gruppe"
+)
+
+palette = Makie.wong_colors()
+
+for (i, gruppe) in enumerate(groupby(BP_df_gesamt, :BP))
+    bp = gruppe.BP[1]
+    zeilen = findall(==(bp), BP_df_gesamt.BP)
+
+    scatter!(
+        ax,
+        vorhersagen[zeilen],
+        residuen[zeilen];
+        color = palette[mod1(i, length(palette))],
+        label = string(bp)
+    )
+end
+
+hlines!(ax, [0]; color = :black, linestyle = :dash)
+axislegend(ax, title = "BP")
+fig
+
+df = CSV.read("PPA-BDE03_ab RMNr43000.csv", DataFrame)
+AOI_df = filter(:Teil => startswith("OI-VAG01e"), df)
+AOI_df.rMenge = Int64.(parse.(Int64,AOI_df.rMenge))
+AOI_VAG01e = filter([:rMenge,:Zeit] => (n,t) -> n == 0 || (n > 1 && t > 200) , AOI_df)
+vscodedisplay(AOI_df)
+
+fig = Figure()
+ax = Axis(fig[1, 1], xlabel = "rMenge", ylabel =
+    "tges", title = "AOI VAG01e")
+scatter!(ax, AOI_VAG01e.rMenge, AOI_VAG01e.Zeit) 
+abline!(ax, n, m, color=:red, linestyle=:dash, label="y=x")
+bx = Axis(fig[2, 1], xlabel = "rMenge", ylabel =
+    "tges", title = "AOI VAG01e (log)") 
+scatter!(bx, foo.(AOI_VAG01e.rMenge),AOI_VAG01e.Zeit .- foo.(AOI_VAG01e.rMenge))
+cx = Axis(fig[3, 1], xlabel = "rMenge", ylabel =
+    "tges", title = "AOI VAG01e (log)")
+density!(cx, AOI_VAG01e.Zeit .- foo.(AOI_VAG01e.rMenge))
+fig
+
+m,n = Theil_Sen_Coefs(Float64.(AOI_VAG01e.rMenge), Float64.(AOI_VAG01e.Zeit))
+foo(x) = m*x + n
