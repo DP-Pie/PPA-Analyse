@@ -6,6 +6,7 @@ const FLAG_RSTUDENT = 0b0001   # 2^0
 const FLAG_HEBEL    = 0b0010   # 2^1
 const FLAG_COOKS    = 0b0100   # 2^2
 const FLAG_UKZ      = 0b1000   # 2^3
+const FLAG_RSTUDENT3 = 0b10000 # 2^4
 
 """
  # ist_ausreißer(flags::Integer) -> Bool
@@ -13,14 +14,18 @@ const FLAG_UKZ      = 0b1000   # 2^3
  Explizite Entscheidungsregel aus dem Ausreißer-Byte:
 
 - Ultrakurzzeit (Bit 3) gesetzt → Ausreißer (Domänenregel, greift allein).
+- RStudent_extrem (Bit 4) gesetzt → Ausreißer (|RStudent| weit über dem
+  Schwellenwert, greift allein).
 - Alle drei Diagnose-Bits (RStudent, Hebelwert, CooksAbstand) gesetzt → Ausreißer.
 """
-ist_ausreißer(flags::Integer) = (flags & FLAG_UKZ != 0) || (flags & (FLAG_RSTUDENT | FLAG_HEBEL | FLAG_COOKS)) == (FLAG_RSTUDENT | FLAG_HEBEL | FLAG_COOKS)
+ist_ausreißer(flags::Integer) = (flags & (FLAG_UKZ | FLAG_RSTUDENT3)) != 0 ||
+    (flags & (FLAG_RSTUDENT | FLAG_HEBEL | FLAG_COOKS)) == (FLAG_RSTUDENT | FLAG_HEBEL | FLAG_COOKS)
 
 """
  # ausreißer_flags(modell, daten::DataFrame; kwargs...)
 
- Regelbasierte Ausreißerklassifikation über vier Diagnose-Flags, die als
+ Regelbasierte Ausreißerklassifikation über fünf Flags (vier Diagnose-Flags plus
+ Ultrakurzzeit), die als
  Bitmaske zusammengefasst werden:
 
  | Bit | Flag          | Kriterium                          |
@@ -29,9 +34,13 @@ ist_ausreißer(flags::Integer) = (flags & FLAG_UKZ != 0) || (flags & (FLAG_RSTUD
  | 1   | `flag_hebel`    | hᵢᵢ > `hebel_faktor` * p / n (Standard: 2/n) |
  | 2   | `flag_cooks`    | CooksAbstand > `t_cooks` / n (Standard: 4/n) |
  | 3   | `flag_ukz`      | Ultrakurzzeit: rMenge > `ukz_n` und tges < `ukz_tges` |
+ | 4   | `flag_rstudent3` | \\|RStudent\\| > `rstudent_faktor` * `t_rstudent` (Standard: 3 * 2.5 = 7.5) |
 
  Entscheidungsregel:
  - `flag_ukz == 1`  → sicherer Ausreißer, da Fehler beim Abstempels des Produktionsauftrags (Domänenregel, OR-Override).
+ - `flag_rstudent3 == 1` → Ausreißer: Das Residuum liegt um den Faktor
+   `rstudent_faktor` über dem RStudent-Schwellenwert und ist damit so extrem,
+   dass es keines weiteren Kriteriums bedarf (OR-Override).
  - `flag_rstudent == flag_hebel == flag_cooks == 1` → Ausreißer
    (alle drei Diagnose-Flags gemeinsam kritisch, AND-Verknüpfung nach
    dem klassischen Schema der Regressionsdiagnostik).
@@ -41,7 +50,9 @@ ist_ausreißer(flags::Integer) = (flags & FLAG_UKZ != 0) || (flags & (FLAG_RSTUD
  Die Bitmaske `flags` ist eine **ID** (welche Kriterien erfüllt sind), keine
  Ordinalskala — ihr Zahlenwert darf nicht als "Schweregrad" verglichen werden.
  Dafür gibt es `n_diagnose` (Anzahl erfüllter Diagnose-Flags, 0–3) und `einstufung`
- ("OK" / "Verdacht" / "Ausreißer").
+ ("OK" / "Verdacht" / "Ausreißer"). Die harten Alleinkriterien `flag_ukz` und
+ `flag_rstudent3` zählen nicht in `n_diagnose`, da sie allein schon zum
+ Ausreißer machen.
 
  Gibt einen DataFrame zurück mit den Rohwerten (`rstudent`, `hii`, `cooksdist`),
  den einzelnen Flags, der Bitmaske `flags`, der Anzahl `n_diagnose`, der
@@ -49,6 +60,9 @@ ist_ausreißer(flags::Integer) = (flags & FLAG_UKZ != 0) || (flags & (FLAG_RSTUD
 
  ## Keyword-Argumente
  - `t_rstudent::Float64 = 2.5` — Grenzwert für den extern studentisierten Residualwert (Absolutbetrag).
+ - `rstudent_faktor::Float64 = 3.0` — Faktor für die harte RStudent-Regel:
+   \\|RStudent\\| > `rstudent_faktor` * `t_rstudent` setzt `flag_rstudent3`
+   und macht den Punkt allein dadurch zum Ausreißer.
  - `p::Int64 = 2` — Anzahl der Modellparameter (einfache lineare Regression: Achsenabschnitt + Steigung).
  - `hebel_faktor::Float64 = 1.0` — Faktor vor p/n für den Hebelwert-Grenzwert. Standard 1.0 → h̄ = 2/n.
    (Lehrbuchüblich ist auch 2.0, also h̄ = 2p/n = 4/n — strengerer Cut.)
@@ -62,6 +76,7 @@ ist_ausreißer(flags::Integer) = (flags & FLAG_UKZ != 0) || (flags & (FLAG_RSTUD
 """
 function ausreißer_flags(modell, daten::DataFrame;
     t_rstudent::Float64 = 2.5,
+    rstudent_faktor::Float64 = 3.0,
     p::Int64 = 2,
     hebel_faktor::Float64 = 1.0,
     t_cooks::Float64 = 4.0,
@@ -76,6 +91,7 @@ function ausreißer_flags(modell, daten::DataFrame;
 
     return _ausreißer_flags(daten, rstudent, hii, cooksdist;
         t_rstudent = t_rstudent,
+        rstudent_faktor = rstudent_faktor,
         p = p,
         hebel_faktor = hebel_faktor,
         t_cooks = t_cooks,
@@ -98,6 +114,7 @@ end
 """
 function _ausreißer_flags(daten::DataFrame, rstudent, hii, cooksdist;
     t_rstudent::Float64 = 2.5,
+    rstudent_faktor::Float64 = 3.0,
     p::Int64 = 2,
     hebel_faktor::Float64 = 3.0,
     t_cooks::Float64 = 4.0,
@@ -117,17 +134,24 @@ function _ausreißer_flags(daten::DataFrame, rstudent, hii, cooksdist;
     flag_cooks    = coalesce.(cooksdist .> cook_cut, false)
     flag_ukz      = (daten.rMenge .> ukz_n) .&& (daten.tges .< ukz_tges)
 
-    # Bitmaske: Bit 0 = RStudent, Bit 1 = Hebelwert, Bit 2 = Cooks, Bit 3 = Ultrakurzzeit
+    # Hartes RStudent-Kriterium: |RStudent| um den Faktor rstudent_faktor
+    # über dem Schwellenwert → alleiniger Ausreißer
+    flag_rstudent3 = coalesce.(abs.(rstudent) .> rstudent_faktor * t_rstudent, false)
+
+    # Bitmaske: Bit 0 = RStudent, Bit 1 = Hebelwert, Bit 2 = Cooks, Bit 3 = Ultrakurzzeit,
+    # Bit 4 = RStudent extrem
     flags = (Int.(flag_rstudent) .<< 0) .|
             (Int.(flag_hebel)    .<< 1) .|
             (Int.(flag_cooks)    .<< 2) .|
-            (Int.(flag_ukz)      .<< 3)
+            (Int.(flag_ukz)      .<< 3) .|
+            (Int.(flag_rstudent3) .<< 4)
 
     # Entscheidungsregel — einzige Quelle der Wahrheit ist `ist_ausreißer`
     ist_ausreißer_flagged = ist_ausreißer.(flags)
 
-    # Anzahl erfüllter Diagnose-Flags als Score (0–3), Ultrakurzzeit zählt nicht mit,
-    # da sie allein schon zum Ausreißer macht
+    # Anzahl erfüllter Diagnose-Flags als Score (0–3), Ultrakurzzeit und das
+    # harte RStudent-Kriterium zählen nicht mit, da sie allein schon zum
+    # Ausreißer machen
     n_diagnose = Int.(flag_rstudent) .+ Int.(flag_hebel) .+ Int.(flag_cooks)
 
     # Einstufung: Ausreißer (hard) > Verdacht (Mehrheitsvotum) > OK
@@ -145,6 +169,7 @@ function _ausreißer_flags(daten::DataFrame, rstudent, hii, cooksdist;
         :flag_hebel    => flag_hebel,
         :flag_cooks    => flag_cooks,
         :flag_ukz      => flag_ukz,
+        :flag_rstudent3 => flag_rstudent3,
         :flags         => flags,
         :n_diagnose    => n_diagnose,
         :einstufung    => einstufung,
@@ -212,6 +237,7 @@ end
 """
 function ausreißer_flags_mad(daten::AbstractDataFrame, Reg::Symbol = :MM, formel = FORMELN[:linear];
     t_rstudent::Float64 = 2.5,
+    rstudent_faktor::Float64 = 3.0,
     hebel_faktor::Float64 = 3.0,
     t_cooks::Float64 = 4.0,
     ukz_n::Float64 = 1.0,
@@ -235,6 +261,7 @@ function ausreißer_flags_mad(daten::AbstractDataFrame, Reg::Symbol = :MM, forme
         diag.hii,
         diag.cooks_mad;
         t_rstudent = t_rstudent,
+        rstudent_faktor = rstudent_faktor,
         p = p,
         hebel_faktor = hebel_faktor,
         t_cooks = t_cooks,
@@ -246,6 +273,7 @@ end
 
 function ausreißer_flags_setzen!(teil::Teil, Reg::Symbol = :MM, formel = FORMELN[:linear];
     t_rstudent::Float64 = 2.5,
+    rstudent_faktor::Float64 = 3.0,
     hebel_faktor::Float64 = 3.0,
     t_cooks::Float64 = 4.0,
     ukz_n::Float64 = 1.0,
@@ -254,6 +282,7 @@ function ausreißer_flags_setzen!(teil::Teil, Reg::Symbol = :MM, formel = FORMEL
 )
     flags_df = ausreißer_flags_mad(teil.df, Reg, formel;
         t_rstudent = t_rstudent,
+        rstudent_faktor = rstudent_faktor,
         hebel_faktor = hebel_faktor,
         t_cooks = t_cooks,
         ukz_n = ukz_n,
@@ -269,6 +298,7 @@ end
 # Kurzform: Formel statt Verfahren -> Reg läuft auf :MM
 function ausreißer_flags_setzen!(teil::Teil, formel::StatsModels.FormulaTerm;
     t_rstudent::Float64 = 2.5,
+    rstudent_faktor::Float64 = 3.0,
     hebel_faktor::Float64 = 3.0,
     t_cooks::Float64 = 4.0,
     ukz_n::Float64 = 1.0,
@@ -277,6 +307,7 @@ function ausreißer_flags_setzen!(teil::Teil, formel::StatsModels.FormulaTerm;
 )
     return ausreißer_flags_setzen!(teil, :MM, formel;
         t_rstudent = t_rstudent,
+        rstudent_faktor = rstudent_faktor,
         hebel_faktor = hebel_faktor,
         t_cooks = t_cooks,
         ukz_n = ukz_n,

@@ -259,6 +259,7 @@ const FORMELN = Dict{Symbol, StatsModels.FormulaTerm}(
     # yj_tges = yeo_johnson(tges) vorab anlegen: λ̂ = yeo_johnson_auf_teil!(teil)
     :yeojohnson => @formula(yj_tges ~ rMenge),
     # :quad => @formula(tges ~ rMenge + rMenge2),   # rMenge2 = rMenge .^ 2 vorab anlegen
+    :linearBDE => @formula(Zeit ~ rMenge),
 )
 
 """

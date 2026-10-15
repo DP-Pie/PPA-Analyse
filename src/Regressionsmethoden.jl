@@ -3,6 +3,7 @@
 # =========================================================================
 function PrepareData!(teil::Teil, Reg::Symbol = :MM, formel = FORMELN[:linear];
         t_rstudent::Float64 = 2.5,
+        rstudent_faktor::Float64 = 3.0,
         hebel_faktor::Float64 = 3.0,
         t_cooks::Float64 = 4.0,
         ukz_n::Float64 = 1.0,
@@ -11,6 +12,7 @@ function PrepareData!(teil::Teil, Reg::Symbol = :MM, formel = FORMELN[:linear];
 
     ausreißer_flags_setzen!(teil, Reg, formel;
     t_rstudent,
+    rstudent_faktor,
     hebel_faktor,
     t_cooks,
     ukz_n,
@@ -34,6 +36,7 @@ end
 # =========================================================================
 function theil_sen_regression!(teil::Teil, formel = FORMELN[:linear];
         t_rstudent::Float64 = 2.5,
+        rstudent_faktor::Float64 = 3.0,
         hebel_faktor::Float64 = 3.0,
         t_cooks::Float64 = 4.0,
         ukz_n::Float64 = 1.0,
@@ -42,6 +45,7 @@ function theil_sen_regression!(teil::Teil, formel = FORMELN[:linear];
 
     OK_df, Messpunkte, Ausreißer, Ausreißer_pro = PrepareData!(teil, :TheilSen, formel;
         t_rstudent,
+        rstudent_faktor,
         hebel_faktor,
         t_cooks,
         ukz_n,
@@ -111,6 +115,15 @@ end
       λ̂ steht in `stats.λ` für Rücktransformationen bereit
       (`yeo_johnson_inv`, `yeo_johnson_vorhersage`, `yeo_johnson_steigungen`).
 
+ ## Quelle der Zeitgröße
+
+ `quelle` (Standard `:tges`): Spalte der Zeitgröße in `teil.df`. Bei
+ `quelle != :tges` wird die Quelle vorab als kanonische Spalte `:tges`
+ in `teil.df` übernommen (eine vorhandene :tges-Spalte wird überschrieben),
+ denn die Ausreißer-Diagnostik (UKZ-Regel), `FORMELN` und die gesamte
+ nachgelagerte Pipeline (diagnostik!, Diagramme) arbeiten auf `:tges`.
+ Beispiel BDE02: `theil_sen_regression_yj!(teil; quelle = :Zeit)`.
+
  ## Rückgabe
 
  Named Tuple `(lin, yj, λ)`: lineares `RegressionsModell`, YJ-`RegressionsModell`
@@ -125,18 +138,25 @@ end
  ```
 """
 function theil_sen_regression_yj!(teil::Teil;
+        quelle::Symbol = :tges,
         t_rstudent::Float64 = 2.5,
+        rstudent_faktor::Float64 = 3.0,
         hebel_faktor::Float64 = 3.0,
         t_cooks::Float64 = 4.0,
         ukz_n::Float64 = 1.0,
         ukz_tges::Float64 = 200.0,
         verdacht_min::Int64 = 2)
 
+    # Kanonische :tges-Spalte bereitstellen; quelle hat Vorrang:
+    # UKZ-Regel, FORMELN und diagnostik!/Diagramme arbeiten auf :tges
+    quelle != :tges && (teil.df.tges = teil.df[!, quelle])
+
     # --- Pass 1: λ̂ auf Rohdaten, Flags auf der YJ-Skala -------------------
-    yeo_johnson_auf_teil!(teil)                       # λ̂-Pass 1, Spalte :yj_tges
+    yeo_johnson_auf_teil!(teil; quelle = quelle)      # λ̂-Pass 1, Spalte :yj_tges
     _, Messpunkte, Ausreißer, Ausreißer_pro = PrepareData!(
         teil, :TheilSen, FORMELN[:yeojohnson];
         t_rstudent = t_rstudent,
+        rstudent_faktor = rstudent_faktor,
         hebel_faktor = hebel_faktor,
         t_cooks = t_cooks,
         ukz_n = ukz_n,
@@ -154,7 +174,7 @@ function theil_sen_regression_yj!(teil::Teil;
 
     # --- Pass 2: finales λ̂ auf den OK-Punkten, YJ-Werte final --------------
     λ̂ = yeo_johnson_λ(Float64.(OK_df.tges))
-    yeo_johnson_auf_teil!(teil; λ = λ̂)               # Spalte mit finalem λ̂
+    yeo_johnson_auf_teil!(teil; quelle = quelle, λ = λ̂)               # Spalte mit finalem λ̂
     OK_yj_df = DataFrame(
         rMenge = OK_df.rMenge,
         yj_tges = yeo_johnson(Float64.(OK_df.tges), λ̂)
@@ -303,6 +323,7 @@ end
 #//////////////////////////////////////////////////
 function mm_regression!(teil::Teil, formel = FORMELN[:linear];
         t_rstudent::Float64 = 2.5,
+        rstudent_faktor::Float64 = 3.0,
         hebel_faktor::Float64 = 3.0,
         t_cooks::Float64 = 4.0,
         ukz_n::Float64 = 1.0,
@@ -312,6 +333,7 @@ function mm_regression!(teil::Teil, formel = FORMELN[:linear];
 
     OK_df, Messpunkte, Ausreißer, Ausreißer_pro = PrepareData!(teil, :MM, formel;
         t_rstudent,
+        rstudent_faktor,
         hebel_faktor,
         t_cooks,
         ukz_n,
@@ -437,5 +459,294 @@ function mm_regression_fit(formula, daten::AbstractDataFrame; maxiter::Integer =
         RobustModels.MMEstimator{RobustModels.TukeyLoss}();
         σ0 = :mad,
         maxiter = maxiter
+    )
+end
+
+# =========================================================================
+# Mixed-Model-Regression (MixedModels.jl)
+# =========================================================================
+
+"""
+ # lmm_regression!(teile::Dict{String,Teil}; kwargs...) -> NamedTuple
+
+ Lineares gemischtes Modell über ALLE Teile des Dictionaries mit partiellem
+ Pooling der Gruppenkoeffizienten:
+
+     tges ~ 1 + rMenge + (1 + rMenge | Gruppe)
+
+ VORAUSSETZUNG: MixedModels muss geladen sein (`using MixedModels` in
+ main.jl), da die Aufrufe von `fit(MixedModel, ...)` und `raneftables`
+ erst zur Laufzeit aufgelöst werden. Notebook-Umgebungen ohne MixedModels
+ können die Datei weiterhin includen — nur der Aufruf braucht das Paket.
+
+ Anders als `theil_sen_regression_yj!`/`mm_regression!` (ein Aufruf = ein Teil)
+ ist der Fit global: alle Messpunkte aller Teile fließen gemeinsam in EIN
+ Modell ein. Ein Aufruf bearbeitet daher das ganze Dictionary und legt JEDEM
+ Teil sein Gruppen-Ergebnis als `RegressionsModell "MixedModel"` in
+ `teil.RegressionsModell` ab.
+
+ - Fixe Effekte  (`c_Intercept`, `c_Slope`): globale Gerade über alle Gruppen.
+ - Zufallseffekte (`rng_Intercept`, `rng_Slope`): Abweichung der Gruppe vom
+   globalen Muster — Gruppen mit wenig Daten werden Richtung Pool geschrumpft.
+ - Gruppengerade (`all_Intercept`, `all_Slope`): fix + zufällig; liegt als
+   `stats.m` (Steigung) und `stats.n` (Achsenabschnitt) vor, wie bei
+   Theil-Sen/MM, damit Auswertungen (ausschluss_grund, Meta-Regression)
+   unverändert weiterlaufen.
+
+ ## Argumente
+
+ - `quelle`: Zeitspalte in `teil.df` (Standard `:tges`; AOI/BDE02: `:Zeit`).
+ - `prädiktor`: Mengenspalte (Standard `:rMenge`).
+ - `ausnehmen`: Teilnamen, die NICHT in den Fit eingehen (Standard
+   `["Sonstiges"]` — gemischte Restgruppe, eine Regression darüber wäre
+   bedeutungslos). Diese Teile erhalten auch kein `"MixedModel"`-Eintrag.
+ - `ausreißer_filtern`: falls true (Standard), werden Zeilen mit Stufe-1-Flag
+   `"Ausreißer"` vor dem Fit entfernt (analog zu AOI_fit_df beim Bayes-Weg);
+   `"Verdacht"` bleibt drin. Voraussetzung: das Flag existiert (Spalte
+   `:Ausreißer`, sonst fließen die Punkte ungefiltert ein.
+
+ ## Rückgabe
+
+ NamedTuple `(lmm, fix, gruppen)`:
+ - `lmm`     ... das MixedModels-Objekt (StatsAPI.predict/-coef nutzbar)
+ - `fix`     ... `DataFrame(coeftable(lmm))` der fixen Effekte
+ - `gruppen` ... Übersicht je Gruppe: `c_/rng_/all_Intercept`, `c_/rng_/all_Slope`
+
+ ## Beispiel
+ ```julia
+ erg = lmm_regression!(AOI_teile; quelle = :Zeit)
+ vscodedisplay(erg.fix)
+ vscodedisplay(erg.gruppen)
+ liste_regressionsmodelle(AOI_teile["VAG01e"])   # enthält jetzt "MixedModel"
+ ```
+"""
+function lmm_regression!(teile::Dict{String,Teil};
+        quelle::Symbol = :tges,
+        prädiktor::Symbol = :rMenge,
+        ausnehmen::Vector{String} = String["Sonstiges"],
+        ausreißer_filtern::Bool = true)
+
+    # --- 1. gepoolten Datensatz über alle verwendeten Teile bauen ----------
+    # je Teil: Ausreißer entfernen, auf die Regressions­spalten reduzieren,
+    # Spalten kanonisch als :tges/:rMenge benennen (die Formel des Fits ist
+    # fest auf diese Namen definiert)
+    daten_je_teil = Dict{String,DataFrame}()
+
+    for (name, teil) in teile
+        name in ausnehmen && continue
+
+        d = teil.df
+        if !(hasproperty(d, quelle) && hasproperty(d, prädiktor))
+            @warn "lmm_regression!: Teil '$(name)' übersprungen — Spalten $(quelle)/$(prädiktor) fehlen"
+            continue
+        end
+
+        rows = ausreißer_filtern && hasproperty(d, :Ausreißer) ?
+            filter(:Ausreißer => a -> a != "Ausreißer", d) : d
+
+        sub = dropmissing(select(rows, quelle => :tges, prädiktor => :rMenge))
+        nrow(sub) == 0 && (@warn "lmm_regression!: Teil '$(name)' ohne verwertbare Punkte"; continue)
+
+        daten_je_teil[name] = sub
+    end
+
+    isempty(daten_je_teil) &&
+        throw(ArgumentError("lmm_regression!: kein Teil verwertbar — Fit nicht möglich"))
+
+    fit_df = vcat([hcat(sub, DataFrame(Gruppe = fill(name, nrow(sub))))
+                   for (name, sub) in daten_je_teil]...)
+
+    # --- 2. globales Modell fitten ------------------------------------------
+    lmm = fit(MixedModel,
+        @formula(tges ~ 1 + rMenge + (1 + rMenge | Gruppe)),
+        fit_df)
+
+    fix = StatsAPI.coef(lmm)            # [β0, β1] — Intercept zuerst
+    fix_se = StatsAPI.stderror(lmm)
+
+    # raneftables liefert ein TypedTables.Table (1-D); in einen DataFrame
+    # konvertieren: 1. Spalte Gruppenname, 2. rng_Intercept, 3. rng_Slope
+    re_df = DataFrame(raneftables(lmm).Gruppe)
+    rng = Dict{String,Tuple{Float64,Float64}}(
+        string(re_df[i, 1]) => (Float64(re_df[i, 2]), Float64(re_df[i, 3]))
+        for i in 1:nrow(re_df))
+
+    # --- 3. je Teil das Gruppen-Ergebnis als RegressionsModell ablegen ------
+    gruppen = DataFrame(Gruppe = String[], n_OK = Int[],
+                       c_Intercept = Float64[], c_Slope = Float64[],
+                       rng_Intercept = Float64[], rng_Slope = Float64[],
+                       all_Intercept = Float64[], all_Slope = Float64[])
+
+    for (name, teil) in teile
+        name in ausnehmen && continue
+        haskey(daten_je_teil, name) || continue
+
+        sub = daten_je_teil[name]
+        n_OK = nrow(sub)
+        n_Ausreißer = teil.n - n_OK
+
+        r0, r1 = get(rng, name, (NaN, NaN))
+        a = fix[1] + r0                  # all_Intercept
+        m = fix[2] + r1                   # all_Slope
+
+        x = Float64.(sub.rMenge)
+        y = Float64.(sub.tges)
+        y_hat = a .+ m .* x
+
+        stats_df = DataFrame(
+            Regression = ["MixedModel"],
+            LOSS_Fkt = ["ML"],
+            n_Rohdaten = teil.n,
+            n_OK = n_OK,
+            n_Ausreißer = n_Ausreißer,
+            pro_Ausreißer = n_Ausreißer / teil.n,
+            m = [m],
+            n = [a],
+            c_Intercept = [fix[1]],
+            c_Slope = [fix[2]],
+            rng_Intercept = [r0],
+            rng_Slope = [r1],
+            std_err = [fix_se[2]],
+            r2 = [NaN]
+        )
+
+        points_df = DataFrame(
+            x = x,
+            y = y,
+            y_hat = y_hat,
+            residuals = y .- y_hat
+        )
+
+        modell = RegressionsModell(
+            name = "MixedModel",
+            modell = lmm,
+            stats = stats_df,
+            points = points_df
+        )
+
+        teil.RegressionsModell[modell.name] = modell
+
+        push!(gruppen, (Gruppe = name, n_OK = n_OK,
+                        c_Intercept = fix[1], c_Slope = fix[2],
+                        rng_Intercept = r0, rng_Slope = r1,
+                        all_Intercept = a, all_Slope = m))
+    end
+
+    return (lmm = lmm, fix = DataFrame(StatsAPI.coeftable(lmm)), gruppen = gruppen)
+end
+
+# =========================================================================
+# Stufe 2/3 (Option D): Bewertung und Meta-Regression der Stufe-1-Ergebnisse
+# =========================================================================
+
+"""
+ # ausschluss_grund(m, a, λ, n_OK, pro_ausreißer; kwargs) -> String
+
+ Prüft, ob das Ergebnis einer Stufe-1-Regression (Koeffizienten einer Gruppe)
+ für die Meta-Regression brauchbar ist (Stufe 2 von Option D).
+
+ ## Rückgabe
+
+ `""` wenn brauchbar, sonst der Ausschlussgrund — damit kann gefiltert werden
+ mit `filter(:Ausschluss => isempty, ergebnisse)` und der Grund je Gruppe
+ mitprotokolliert werden.
+
+ ## Kriterien (Keyword-Argumente)
+
+ - `min_n_OK = 5`: mindestens so viele bereinigte Messpunkte (Theil-Sen
+   braucht mehrere unterschiedliche rMenge-Werte, um stabil zu sein).
+ - `max_pro_ausreißer = 0.5`: max. Anteil aussortierter Punkte; darüber ist
+   die Klassifikation nicht mehr vertrauenswürdig.
+ - `positive_steigung = true`: Stückzeit m > 0, negative Werte sind
+   physikalisch unsinnig.
+ - `positiver_abschnitt = false`: prüft zusätzlich a >= 0. Standard aus, denn
+   der Achsenabschnitt extrapoliert auf n = 0 und darf auch bei gutem Fit
+   negativ sein, wenn die Daten erst ab n >= 1 beginnen.
+"""
+function ausschluss_grund(m, a, λ, n_OK, pro_ausreißer;
+        min_n_OK::Int = 5,
+        max_pro_ausreißer::Float64 = 0.5,
+        positive_steigung::Bool = true,
+        positiver_abschnitt::Bool = false)
+
+    !isfinite(m) && return "m nicht endlich"
+    !isfinite(a) && return "a nicht endlich"
+    !isfinite(λ) && return "λ nicht endlich"
+    n_OK < min_n_OK && return "n_OK = $(n_OK) < $(min_n_OK)"
+    pro_ausreißer > max_pro_ausreißer && return "Ausreißeranteil $(round(pro_ausreißer * 100; digits = 1)) % > $(max_pro_ausreißer * 100) %"
+    positive_steigung && m <= 0 && return "Steigung m <= 0"
+    positiver_abschnitt && a < 0 && return "Achsenabschnitt a < 0"
+    return ""
+end
+
+"""
+ # meta_regression(daten, ziel; prädiktoren = Symbol[], ...) -> RobustLinearModel
+
+ Meta-Regression (Stufe 3 von Option D): regressiert die Stufe-1-Koeffizienten
+ (z.B. `:m` oder `:a` je Gruppe) robust über die Gruppen.
+
+ - Ohne `prädiktoren`: nur Intercept → robust gepoolter Wert (MM) über alle
+   Gruppen, funktional das Random-Intercepts-Pendant des LMM.
+ - Mit `prädiktoren`: echte Meta-Regression, z.B. `prädiktoren = [:Länge]`
+   für `m ~ Länge` (funktional Random-Intercepts und -Slopes).
+
+ Fällt der MM-S-Schritt mit PosDefException (siehe Hinweis in
+ `mm_regression_fit`), wird automatisch auf den konvergenten
+ M-Estimator (TukeyLoss) ausgewichen.
+
+ ## Beispiel
+ ```julia
+ meta_m  = meta_regression(AOI_brauchbar, :m)                   # gepoolte Stückzeit
+ meta_lm = meta_regression(PTFE_ergebnisse, :m; prädiktoren = [:Länge])
+ ```
+"""
+function meta_regression(daten::AbstractDataFrame, ziel::Symbol;
+        prädiktoren::Vector{Symbol} = Symbol[],
+        estimator::Type = RobustModels.MMEstimator{RobustModels.TukeyLoss},
+        maxiter::Integer = 1000)
+
+    rhs = isempty(prädiktoren) ? StatsModels.term(1) :
+                                reduce(+, StatsModels.term.(prädiktoren))
+    f = StatsModels.term(ziel) ~ rhs
+
+    try
+        return RobustModels.rlm(f, daten, estimator(); σ0 = :mad, maxiter = maxiter)
+    catch e
+        e isa PosDefException || rethrow()
+        @warn "MM-S-Schritt fehlgeschlagen (PosDefException), Fallback auf M-Estimator (TukeyLoss); Ziel: $(ziel)"
+        return RobustModels.rlm(f, daten, RobustModels.MEstimator{RobustModels.TukeyLoss}();
+                                σ0 = :mad, maxiter = maxiter)
+    end
+end
+
+"""
+ # meta_ausreißer(daten, ziel, modell; k = 3.0) -> DataFrame
+
+ Level-2-Diagnostik der Meta-Regression: Ausreißer-Gruppen. Die Residuen der
+ Gruppen gegen die Meta-Regression werden mit der MAD-Skala standardisiert
+ (1.4826 * median(|e - median(e)|)); Gruppen mit |r_MAD| > k passen nicht zum
+ gepoolten Muster und sind ein genauerer Blick in Stufe 1 wert.
+
+ ## Rückgabe
+
+ DataFrame mit `:Gruppe`, dem Zielwert, Vorhersage, Residuum, `r_MAD` und
+ `ist_ausreißer`. Voraussetzung: `daten` enthält eine Spalte `:Gruppe` und
+ liegt in derselben Zeilenordnung wie der Fit.
+"""
+function meta_ausreißer(daten::AbstractDataFrame, ziel::Symbol, modell; k::Float64 = 3.0)
+    y = Float64.(daten[!, ziel])
+    ŷ = StatsAPI.predict(modell)
+    e = y .- ŷ
+
+    σ = 1.4826 * median(abs.(e .- median(e)))
+    r_MAD = σ > 0 ? (e .- median(e)) ./ σ : zeros(length(e))
+
+    return DataFrame(
+        :Gruppe       => daten.Gruppe,
+        ziel          => y,
+        :vorhersage   => ŷ,
+        :residuum     => e,
+        :r_MAD        => r_MAD,
+        :ist_ausreißer => abs.(r_MAD) .> k
     )
 end

@@ -131,6 +131,66 @@ function erstelle_teile(df::DataFrame)
 end
 
 """
+ # erstelle_teile_aus_gruppe(gdf::GroupedDataFrame) -> Dict{String, Teil}
+
+ Erstellt aus einem GroupedDataFrame (z.B. AOI-Platinen nach :Gruppe) ein
+ Dictionary von `Teil`-Objekten — ein Teil je Gruppe. Im Gegensatz zu
+ `erstelle_teile` werden keine Metadaten-Spalten (TA, Zustand, Sollte, ...)
+ benötigt, da Datenquellen wie BDE02 sie nicht liefern; die Felder werden
+ mit Platzhaltern belegt:
+ TA = 0, Zustand = true, Bezeichnung = "", Aktivität = "",
+ Soll_te = Soll_tr = NaN.
+
+ ## Voraussetzungen an die Gruppen-Daten
+
+ - Gruppierung nach genau EINER Spalte (deren Wert wird Teilname und :Gruppe).
+ - Die Messspalten der Regression (:tges, :rMenge) müssen vorhanden und
+   ohne missing sein (ggf. vorher `dropmissing!`).
+
+ ## Beispiel
+ ```julia
+ AOI_teile = erstelle_teile_aus_gruppe(groupby(AOI_df, :Gruppe))
+ ```
+"""
+function erstelle_teile_aus_gruppe(gdf::GroupedDataFrame)
+    gruppen_spalten = DataFrames.groupcols(gdf)
+    length(gruppen_spalten) == 1 ||
+        throw(ArgumentError("erstelle_teile_aus_gruppe unterstützt nur genau eine Gruppierungsspalte, erhalten: $(gruppen_spalten)"))
+    gruppen_spalte = only(gruppen_spalten)
+
+    teile = Dict{String, Teil}()
+
+    for gruppe in gdf
+        name = string(gruppe[1, gruppen_spalte])
+        daten = select(gruppe, Not(gruppen_spalte))
+
+        teile[name] = Teil(
+            df = daten,
+            name = name,
+            TA = 0,
+            Zustand = true,
+            Bezeichnung = "",
+            Aktivität = "",
+            Gruppe = name,
+            n = nrow(gruppe),
+            Soll_te = NaN,
+            Soll_tr = NaN,
+            RegressionsModell = Dict{String, RegressionsModell}()
+        )
+    end
+
+    return teile
+end
+
+function erstelle_teile_aus_gruppe(df::DataFrame,Gruppe::Symbol)
+    return erstelle_teile_aus_gruppe(groupby(df,Gruppe))
+end
+
+function erstelle_teile_aus_gruppe(df::DataFrame,Gruppe::String)
+    return erstelle_teile_aus_gruppe(groupby(df,Symbol(Gruppe)))
+end
+
+"""
 # truncate_float(x; digits=3)
 
 Kürzt die Dezimaldarstellung einer Zahl auf `digits` Nachkommastellen.
