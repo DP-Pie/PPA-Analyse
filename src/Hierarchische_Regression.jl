@@ -611,3 +611,313 @@ function bayes_abdeckung(residuen::AbstractDataFrame; ν::Real = 30.0, niveau::F
                  abd_spalte, :deckung_defizit_se, :bias_std, :trend_std, :streu_faktor,
                  :RMSE, :median_resid, :MAD_resid, :Begründung)
 end
+
+# =========================================================================
+# bayes_regression!: robustes Bayes-Modell als RegressionsModell je Teil
+# =========================================================================
+#
+# Pendant zu lmm_regression! (Regressionsmethoden.jl): EIN globaler Fit über
+# alle Messpunkte (robust_bayes_lmm), aber die Ergebnisse werden je Gruppe
+# als Eintrag "Bayes" in teil.RegressionsModell abgelegt — damit laufen
+# liste_regressionsmodelle, Plot_Gruppe(...; Regression = "Bayes") und
+# collect_diagnistic(teiledict, "Bayes") wie bei Theil-Sen/MM/MixedModel.
+#
+# Ablauf:
+#   1. Theil-Sen-YJ-Check je Teil: Fehlt der Eintrag "Theil-Sen YJ", wird
+#      theil_sen_regression_yj! nachgeholt (Stufe 1, Ausreißer-Flags).
+#      Schlägt der Fit fehl, fließen die Punkte des Teils ungefiltert in
+#      den Bayes-Fit (Warnung) — wie bei lmm_regression!.
+#   2. Gepoolter Fit-Datensatz: je Teil Ausreißer entfernen, Spalten
+#      quelle/prädiktor übernehmen, :Gruppe = Teilname. Die Restgruppe
+#      "Sonstiges" bleibt vom Fit ausgeschlossen — gemischte Kleingruppen
+#      bekämen eine bedeutungslose Zufallsverteilung.
+#   3. Fit mit robust_bayes_lmm (partielles Pooling + Student-t-Fehler).
+#   4. Je Teil RegressionsModell "Bayes":
+#      - stats: gepoolte Koeffizienten (m/n) mit 95 %-Intervall, globale
+#        fixe Effekte (c_Intercept/c_Slope), Zufallsabweichungen
+#        (rng_Intercept/rng_Slope), ν und σ — Spalten kompatibel zu "MixedModel".
+#      - points: x, y, y_hat, residuals der bereinigten Punkte
+#        (y_hat = a + m·x = Posterior-Mittel-Vorhersage der Gruppe).
+#      - Diagnostik: Abdeckungs-Einstufung der Gruppe (bayes_abdeckung mit
+#        Spalten Stufe_Wert/Stufe/Begründung); für "Sonstiges" stattdessen
+#        eine feste Verwerfen-Diagnose mit der Begründung zu wenige Einträge.
+#      - modell: das volle Bayes-Ergebnis (NamedTuple mit Kette, fix,
+#        gruppe, skala, ν, σ) — jede Gruppe hält dasselbe Objekt per
+#        Referenz, es wird nichts kopiert.
+#
+# Die Restgruppe "Sonstiges" erhält KEINE Zufallseffekte, sondern nur die
+# statischen (fixen) Effekte als Gerade (rng_* = 0) und die Verwerfen-
+# Diagnose — sie ist damit im Bestand sichtbar, wird aber von Auswertungen
+# über die Diagnostik-Stufe ausgeschlossen.
+
+"""
+ # bayes_regression!(teile::Dict{String,Teil}; kwargs...) -> NamedTuple
+ # bayes_regression!(df::DataFrame, zielspalte::Symbol; kwargs...) -> NamedTuple
+
+ Speichert das hierarchische Student-t-Modell (`robust_bayes_lmm`, Weg 2) je
+ Gruppe als `RegressionsModell "Bayes"` ab — analog zu `lmm_regression!`,
+ das dasselbe für das klassische MixedModel tut.
+
+ ## Variante A: aus dem Roh-DataFrame
+
+ ```julia
+ erg = bayes_regression!(AOI_df, :Platine; quelle = :Zeit)
+ ```
+
+ Legt die Gruppierung selbst an (wie das Beispiel in main.jl):
+ `df_gruppe_anlegen!(df, zielspalte; n_min)` schreibt die Spalte :Gruppe —
+ Werte der Zielspalte, Kleingruppen mit < `n_min` Einträgen als `sonstiges`
+ (Achtung: eine vorhandene :Gruppe-Spalte wird überschrieben) — und
+ `erstelle_teile_aus_gruppe` erzeugt ein Teil je Gruppe, Sonstiges inklusive.
+ Die Rückgabe enthält zusätzlich das erzeugte `teile`-Dict.
+
+ ## Variante B: bestehendes Teile-Dict
+
+ ```julia
+ erg = bayes_regression!(AOI_Teile_group; quelle = :Zeit)
+ liste_regressionsmodelle(AOI_Teile_group["VAG01e"])   # enthält jetzt "Bayes"
+ Plot_Gruppe(AOI_Teile_group, :rMenge, :Zeit; Regression = "Bayes")
+ ```
+
+ ## Restgruppe "Sonstiges"
+
+ Bleibt vom Fit ausgeschlossen (gemischte Kleingruppen — eine eigene
+ Zufallsverteilung wäre bedeutungslos). Ihr RegressionsModell enthält nur
+ die statischen (fixen) Effekte als Gerade (`rng_* = 0`) und in `Diagnostik`
+ eine feste Verwerfen-Diagnose mit der Begründung "zu wenige Einträge".
+
+ ## Keyword-Argumente
+
+ - `quelle`: Zeitspalte (Variante B Standard `:tges`, Variante A Standard
+   `:Zeit` für BDE02-Frames).
+ - `prädiktor`: Mengenspalte, Standard `:rMenge`.
+ - `sonstiges`: Name der Restgruppe, Standard "Sonstiges".
+ - `ausreißer_filtern`: Stufe-1-Flags anwenden (Standard true; fehlen sie,
+   fließen die Punkte ungefiltert ein).
+ - `N_samples`, `ketten`, `seed`, `kette`: wie `robust_bayes_lmm`. Mit
+   `kette` kann eine bereits gesampelte Kette (gleicher Datenstand!)
+   übergeben werden — dann entfällt das Sampling.
+ - `diagnostik`: Abdeckungs-Diagnostik je Gruppe gleich mitrechnen
+   (Standard true; reine Nachbearbeitung der Kette, kein Sampling).
+ - `n_min` (nur Variante A): Mindesteinträge je Gruppe, darunter "Sonstiges".
+
+ ## Rückgabe
+
+ NamedTuple `(bayes, fix, gruppe[, teile])`: das volle `robust_bayes_lmm`-
+ Ergebnis, die fixe-Effekte-Tabelle, die Gruppen-Koeffizienten und (nur
+ Variante A) das erzeugte Teile-Dict.
+"""
+function bayes_regression!(teile::Dict{String,Teil};
+        quelle::Symbol = :tges,
+        prädiktor::Symbol = :rMenge,
+        sonstiges::String = "Sonstiges",
+        ausreißer_filtern::Bool = true,
+        N_samples::Int = 500,
+        ketten::Int = 4,
+        seed::Int = 20261013,
+        kette = nothing,
+        diagnostik::Bool = true)
+
+    # --- 1. Theil-Sen-YJ-Check: Stufe-1-Ausreißerflags je Teil sicherstellen
+    for (name, teil) in teile
+        haskey(teil.RegressionsModell, "Theil-Sen YJ") && continue
+        try
+            theil_sen_regression_yj!(teil; quelle = quelle)
+        catch e
+            @warn "bayes_regression!: Theil-Sen-YJ für Teil '$(name)' fehlgeschlagen ($(typeof(e).name.name)) — Punkte fließen ungefiltert in den Bayes-Fit"
+        end
+    end
+
+    # --- 2. gepoolten Fit-Datensatz bauen -----------------------------------
+    # Auch die Sonstiges-Punkte werden hier bereinigt (für deren stats und
+    # points), aber später nicht in den Fit gelegt.
+    daten_je_teil = Dict{String,DataFrame}()
+
+    for (name, teil) in teile
+        d = teil.df
+        if !(hasproperty(d, quelle) && hasproperty(d, prädiktor))
+            @warn "bayes_regression!: Teil '$(name)' übersprungen — Spalten $(quelle)/$(prädiktor) fehlen"
+            continue
+        end
+
+        rows = ausreißer_filtern && hasproperty(d, :Ausreißer) ?
+            filter(:Ausreißer => a -> a != "Ausreißer", d) : d
+
+        sub = dropmissing(select(rows, quelle, prädiktor))
+        nrow(sub) == 0 && (@warn "bayes_regression!: Teil '$(name)' ohne verwertbare Punkte"; continue)
+
+        daten_je_teil[name] = sub
+    end
+
+    fit_teile = [(name, sub) for (name, sub) in daten_je_teil if name != sonstiges]
+    isempty(fit_teile) &&
+        throw(ArgumentError("bayes_regression!: keine verwertbaren Gruppen für den Fit " *
+                            "(mindestens 2 erforderlich, '$(sonstiges)' ausgenommen)"))
+
+    fit_df = vcat([hcat(sub, DataFrame(Gruppe = fill(name, nrow(sub))))
+                   for (name, sub) in fit_teile]...)
+
+    # --- 3. globaler Fit ------------------------------------------------------
+    bayes = robust_bayes_lmm(fit_df, quelle, prädiktor, :Gruppe;
+                            N_samples = N_samples, ketten = ketten,
+                            seed = seed, kette = kette)
+
+    if bayes.gruppe === nothing
+        @error "bayes_regression!: Nachbearbeitung des Bayes-Fits fehlgeschlagen — keine RegressionsModelle gespeichert. " *
+               "Die Kette bleibt erhalten: robust_bayes_lmm(...; kette = bayes.kette) und erneuter Aufruf."
+        return (bayes = bayes, fix = nothing, gruppe = nothing)
+    end
+
+    # --- 4. globale fixe Gerade (Originalskala) -------------------------------
+    # Zeile m der fix-Tabelle = Posterior-Mittel der globalen Steigung γ,
+    # Zeile a = globaler Achsenabschnitt α — das ist die "nur statisch"-
+    # Vorhersage, die die Sonstiges-Grunde erhält.
+    i_m = findfirst(==("m (Stückzeit)"), bayes.fix.Parameter)
+    i_a = findfirst(==("a (Achsenabschnitt)"), bayes.fix.Parameter)
+    m_glob = Float64(bayes.fix.Mittelwert[i_m])
+    a_glob = Float64(bayes.fix.Mittelwert[i_a])
+
+    # --- 5. Abdeckungs-Diagnostik je Gruppe (Nachbearbeitung der Kette) ------
+    abd = nothing
+    abd_idx = Dict{String,Int}()
+    abd_spalte = Symbol("abdeckung_95")   # niveau = 0.95 in bayes_abdeckung
+    if diagnostik
+        residuen = bayes_residuen(fit_df, quelle, prädiktor, :Gruppe, bayes)
+        abd = bayes_abdeckung(residuen; ν = bayes.ν)
+        abd_idx = Dict(String(g) => i for (i, g) in enumerate(abd.Gruppe))
+    end
+
+    # --- 6. je Teil das Gruppen-Ergebnis als RegressionsModell ablegen --------
+    gruppe_idx = Dict(String(g) => i for (i, g) in enumerate(bayes.gruppe.Gruppe))
+
+    for (name, teil) in teile
+        haskey(daten_je_teil, name) || continue
+        sub = daten_je_teil[name]
+        n_OK = nrow(sub)
+        n_Ausreißer = teil.n - n_OK
+        x = Float64.(sub[!, prädiktor])
+        y = Float64.(sub[!, quelle])
+
+        ist_sonstiges = name == sonstiges
+        if ist_sonstiges
+            # Restgruppe: nur die statischen Effekte, keine Zufallseffekte
+            a, m = a_glob, m_glob
+            a_lo = a_hi = m_lo = m_hi = NaN
+            r0 = r1 = 0.0
+        else
+            gi = get(gruppe_idx, name, nothing)
+            gi === nothing && continue   # kann nicht passieren: Fit über dieselben Teile
+            g = bayes.gruppe[gi, :]
+            m = Float64(g.m)
+            a = Float64(g.a)
+            m_lo = Float64(g.m_lo)
+            m_hi = Float64(g.m_hi)
+            a_lo = Float64(g.a_lo)
+            a_hi = Float64(g.a_hi)
+            r0 = a - a_glob                # Zufallsabweichung des Intercepts
+            r1 = m - m_glob                # Zufallsabweichung der Steigung
+        end
+
+        # Posterior-Mittel-Vorhersage je Punkt = Gruppengerade a + m·x
+        y_hat = a .+ m .* x
+
+        stats_df = DataFrame(
+            Regression = ["Bayes"],
+            LOSS_Fkt = ["Student-t (ν geschätzt)"],
+            n_Rohdaten = teil.n,
+            n_OK = n_OK,
+            n_Ausreißer = n_Ausreißer,
+            pro_Ausreißer = n_Ausreißer / teil.n,
+            m = [m],
+            n = [a],
+            m_lo = [m_lo], m_hi = [m_hi],
+            a_lo = [a_lo], a_hi = [a_hi],
+            c_Intercept = [a_glob],
+            c_Slope = [m_glob],
+            rng_Intercept = [r0],
+            rng_Slope = [r1],
+            std_err = [ist_sonstiges ? NaN : (m_hi - m_lo) / (2 * 1.96)],
+            r2 = [NaN],
+            ν = [bayes.ν],
+            σ = [bayes.σ]
+        )
+
+        points_df = DataFrame(
+            x = x,
+            y = y,
+            y_hat = y_hat,
+            residuals = y .- y_hat
+        )
+
+        # Diagnostik: "Sonstiges" wird unabhängig von `diagnostik` fest
+        # verworfen; normale Gruppen erhalten ihre Abdeckungs-Einstufung.
+        # Gleiches Spalten-Schema, damit collect_diagnistic vcaten kann.
+        diag_df = if ist_sonstiges
+            DataFrame(
+                Verfahren = ["Ausschluss"],
+                Koeffizient = ["(Modell)"],
+                n = [n_OK],
+                abdeckung_95 = [NaN],
+                deckung_defizit_se = [NaN],
+                bias_std = [NaN],
+                trend_std = [NaN],
+                streu_faktor = [NaN],
+                RMSE = [NaN],
+                median_resid = [NaN],
+                MAD_resid = [NaN],
+                Stufe_Wert = [1],
+                Stufe = [ABDECKUNG_STUFEN[1]],
+                Begründung = ["zu wenige Einträge (Restgruppe ohne eigene Zufallseffekte, nur statische Effekte)"]
+            )
+        elseif abd !== nothing
+            r = abd[abd_idx[name], :]
+            DataFrame(
+                Verfahren = ["Abdeckung"],
+                Koeffizient = ["(Modell)"],
+                n = [Int(r.n)],
+                abdeckung_95 = [Float64(r[abd_spalte])],
+                deckung_defizit_se = [Float64(r.deckung_defizit_se)],
+                bias_std = [Float64(r.bias_std)],
+                trend_std = [Float64(r.trend_std)],
+                streu_faktor = [Float64(r.streu_faktor)],
+                RMSE = [Float64(r.RMSE)],
+                median_resid = [Float64(r.median_resid)],
+                MAD_resid = [Float64(r.MAD_resid)],
+                Stufe_Wert = [findfirst(==(r.Einstufung), ABDECKUNG_STUFEN)],
+                Stufe = [String(r.Einstufung)],
+                Begründung = [String(r.Begründung)]
+            )
+        else
+            DataFrame()
+        end
+
+        modell = RegressionsModell(
+            name = "Bayes",
+            modell = bayes,           # volles Modell je Gruppe (Referenz, keine Kopie)
+            stats = stats_df,
+            points = points_df,
+            Diagnostik = diag_df
+        )
+
+        teil.RegressionsModell[modell.name] = modell
+    end
+
+    return (bayes = bayes, fix = bayes.fix, gruppe = bayes.gruppe)
+end
+
+# Variante A: Gruppen inkl. Restgruppe "Sonstiges" selbst anlegen (wie das
+# df_gruppe_anlegen!-Beispiel in main.jl) und daraus die Teile erzeugen.
+function bayes_regression!(df::DataFrame, zielspalte::Symbol;
+        quelle::Symbol = :Zeit,
+        prädiktor::Symbol = :rMenge,
+        n_min::Int = 10,
+        sonstiges::String = "Sonstiges",
+        kwargs...)
+
+    df_gruppe_anlegen!(df, zielspalte; Kleinvieh = sonstiges, n_min = n_min)
+    teile = erstelle_teile_aus_gruppe(df, :Gruppe)
+
+    erg = bayes_regression!(teile; quelle = quelle, prädiktor = prädiktor,
+                            sonstiges = sonstiges, kwargs...)
+    return merge(erg, (teile = teile,))
+end

@@ -191,6 +191,100 @@ function erstelle_teile_aus_gruppe(df::DataFrame,Gruppe::String)
 end
 
 """
+ # spalte_gruppe_in_teile(teil::Teil; meta = nothing) -> Dict{String, Teil}
+ # spalte_gruppe_in_teile(gruppen::Dict{String, Teil}; meta = nothing) -> Dict{String, Teil}
+
+ Zerlegt Gruppen-`Teil`-Objekte (aus `erstelle_teile_aus_gruppe`) in ihre
+ Einzelteile. Aufgespalten wird über die `:Teil`-Spalte von `teil.df`; die
+ Regressionsdaten der Gruppe werden als Referenz an jedes Einzelteil
+ übergeben. Ein Modell, viele Zeiger: Speicher und Konsistenz bleiben
+ erhalten, ein `diagnostik!` über ein Einzelteil aktualisiert damit das
+ Gruppenmodell für alle zugehörigen Einzelteile (gleicher Datenstand,
+ gewollt). Wer isolierte Kopien braucht, übergibt stattdessen
+ `deepcopy(teil.RegressionsModell)`.
+
+ ## Metadaten über `meta` nachziehen
+
+ BDE02 liefert keine Metadaten (TA, Zustand, Bezeichnung, AktivitätNeu,
+ Sollte, Solltrsek), auf die `erstelle_teile` zugreift — `erstelle_teile`
+ selbst würde also fehlschlagen. Mit `meta = Teiledict` (BDE01-Sammlung aus
+ `erstelle_teile`, gleiche Teilnamen) werden stattdessen TA, Zustand,
+ Bezeichnung, Aktivität, Soll_te und Soll_tr aus dem gleichnamigen Eintrag
+ übernommen. Ohne Treffer — oder ohne `meta` — bleiben die Platzhalter wie
+ bei `erstelle_teile_aus_gruppe` (TA = 0, Zustand = true, Bezeichnung = "",
+ Aktivität = "", Soll_te = Soll_tr = NaN); `Gruppe` erhält in jedem Fall
+ den Namen der Herkunftsgruppe, sodass die Provenienz erhalten bleibt.
+ Stand 2026-10: Alle 30 AOI-Teile aus BDE02 sind im Teiledict vertreten.
+
+ Die Kennzahlen im `RegressionsModell` (stats, points, Diagnostik) bleiben
+ Gruppeneigenschaften: `points` enthält weiterhin alle Punkte der Gruppe,
+ nicht nur die des Einzelteils.
+
+ ## Beispiel
+ ```julia
+ AOI_testdict = spalte_gruppe_in_teile(AOI_Teile_group; meta = Teiledict)
+ AOI_testdict["OI-VAG01e-01"].RegressionsModell["Theil-Sen"].stats
+ ```
+"""
+function spalte_gruppe_in_teile(teil::Teil; meta::Union{Nothing, Dict{String, Teil}} = nothing)
+    :Teil in propertynames(teil.df) ||
+        throw(ArgumentError(
+            "spalte_gruppe_in_teile braucht eine :Teil-Spalte in teil.df " *
+            "(Gruppen aus erstelle_teile_aus_gruppe haben eine, " *
+            "Teile aus erstelle_teile nicht)."))
+
+    teile = Dict{String, Teil}()
+
+    for gruppe in groupby(teil.df, :Teil)
+        name = String(gruppe.Teil[1])
+        daten = select(gruppe, Not(:Teil))
+
+        # Metadaten aus dem Lookup übernehmen, sonst Platzhalter
+        quelle = meta === nothing ? nothing : get(meta, name, nothing)
+
+        teile[name] = Teil(
+            df = daten,
+            name = name,
+            TA = quelle === nothing ? 0 : quelle.TA,
+            Zustand = quelle === nothing ? true : quelle.Zustand,
+            Bezeichnung = quelle === nothing ? "" : quelle.Bezeichnung,
+            Aktivität = quelle === nothing ? "" : quelle.Aktivität,
+            Gruppe = teil.name,
+            n = nrow(gruppe),
+            Soll_te = quelle === nothing ? NaN : quelle.Soll_te,
+            Soll_tr = quelle === nothing ? NaN : quelle.Soll_tr,
+            RegressionsModell = teil.RegressionsModell
+        )
+    end
+
+    return teile
+end
+
+"""
+ # spalte_gruppe_in_teile(gruppen::Dict{String, Teil}; meta = nothing) -> Dict{String, Teil}
+
+ Fasst die Einzelteile aller Gruppen zu einem Dictionary zusammen. Kommt ein
+ Teilname in mehreren Gruppen vor (sollte bei Platine-Kodierung im Namen
+ nicht passieren), wird ein Fehler geworfen statt still zu überschreiben.
+ `meta` (z.B. das BDE01-Teiledict) wird an jeden Einzelsplit durchgereicht.
+"""
+function spalte_gruppe_in_teile(gruppen::Dict{String, Teil}; meta::Union{Nothing, Dict{String, Teil}} = nothing)
+    teile = Dict{String, Teil}()
+
+    for (gruppenname, gruppe) in gruppen
+        for (name, teil) in spalte_gruppe_in_teile(gruppe; meta = meta)
+            haskey(teile, name) && throw(ArgumentError(
+                "Teil '$name' kommt in mehr als einer Gruppe vor " *
+                "(zuletzt in '$gruppenname') — Zusammenfassen würde " *
+                "still Einträge überschreiben."))
+            teile[name] = teil
+        end
+    end
+
+    return teile
+end
+
+"""
 # truncate_float(x; digits=3)
 
 Kürzt die Dezimaldarstellung einer Zahl auf `digits` Nachkommastellen.

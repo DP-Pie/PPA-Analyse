@@ -99,3 +99,39 @@ function collect_diagnistic(teiledict::Dict{String,Teil}, Regression::String)
 
     return vcat(results...)
 end
+
+"""
+ # speichere_result_excel(result::DataFrame, pfad::String = "Result.xlsx")
+
+ Schreibt den Result-DataFrame als Excel-Tabelle und färbt die
+ :Einschätzung-Spalte je Stufe ein:
+ Verwerfen = dunkelrot, Untersuchen = orange, Akzeptabel = gelb,
+ Sicher = hellgrün, Sehr sicher = grün. Unbekannte Werte bleiben ungefärbt.
+"""
+function speichere_result_excel(result::DataFrame, pfad::String = "Result.xlsx")
+    farben = Dict(
+        "Verwerfen"   => "darkred",     # tiefrot
+        "Untersuchen" => "orange",
+        "Akzeptabel"  => "yellow",
+        "Sicher"      => "lightgreen",  # hellgrün
+        "Sehr sicher" => "green"
+    )
+
+    XLSX.openxlsx(pfad; mode = "w") do xf
+        sheet = XLSX.addsheet!(xf, "Result")
+        XLSX.writetable!(sheet, result)
+
+        # Spaltennummer von :Einschätzung (Header Zeile 1, Daten ab Zeile 2)
+        col = findfirst(==("Einschätzung"), string.(propertynames(result)))
+        col === nothing && throw(ArgumentError("Result hat keine :Einschätzung-Spalte."))
+
+        for (i, stufe) in enumerate(result[!, :Einschätzung])
+            farbe = get(farben, String(stufe), nothing)
+            farbe === nothing && continue
+            XLSX.setFill(sheet, XLSX.CellRef(i + 1, col);
+                         pattern = "solid", fgColor = farbe)
+        end
+    end
+    return pfad
+end
+

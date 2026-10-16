@@ -287,3 +287,119 @@ liste_regressionsmodelle(AOI_Teile_group["VAG01e"])
 AOI_Teile_group["VAG01e"].df
 
 loo_mad_diagnostics(AOI_Teile_group["VAG01e"].df,:TheilSen)
+
+"""
+----
+# Weg 2: Bayes-Regression als Regressionsmodell je Gruppe speichern
+----
+bayes_regression! (Hierarchische_Regression.jl) bündelt den kompletten
+Workflow: Theil-Sen-YJ-Check je Teil (wird nachgeholt, falls "Theil-Sen YJ"
+fehlt), gepoolter Fit via robust_bayes_lmm, Ablage des Ergebnisses je
+Gruppe als RegressionsModell "Bayes" — analog zu lmm_regression!.
+"Sonstiges" bleibt vom Fit ausgeschlossen und erhält nur die statischen
+Effekte plus eine Verwerfen-Diagnose (zu wenige Einträge).
+"""
+
+# Variante B: bestehendes Teile-Dict. Theil-Sen YJ ist hier bereits
+# durchgeführt — der Check in bayes_regression! erkennt das am Eintrag
+# "Theil-Sen YJ" und fitet nicht neu. kette = kette nutzt die oben
+# gesicherte Posterior-Kette (gleicher Datenstand!), kein neues Sampling.
+AOI_bayes_erg = bayes_regression!(AOI_Teile_group; quelle = :Zeit, kette = kette)
+
+vscodedisplay(AOI_bayes_erg.gruppe)                    # gepoolte Koeffizienten je Gruppe
+liste_regressionsmodelle(AOI_Teile_group["VAG01e"])    # enthält jetzt "Bayes"
+Plot_Gruppe(AOI_Teile_group, :rMenge, :Zeit; Regression = "Bayes")
+
+# Diagnostik je Gruppe (Abdeckung) — sammelbar wie bei Theil-Sen:
+diag_df_bayes = collect_diagnistic(AOI_Teile_group, "Bayes")
+vscodedisplay(diag_df_bayes)
+
+# Variante A: aus dem Roh-DataFrame — legt die Gruppen (inkl. "Sonstiges"
+# für Kleingruppen < n_min Einträge) selbst an, wie das
+# df_gruppe_anlegen!-Beispiel oben, und fitet anschließend:
+# erg = bayes_regression!(AOI_df, :Platine; quelle = :Zeit)
+# erg.teile["Sonstiges"].RegressionsModell["Bayes"].Diagnostik
+# # → Stufe "Verwerfen", Begründung: zu wenige Einträge (nur statische Effekte)
+
+AOI_test_df, AOI_dict = bayes_regression!(AOI_df,:Platine; quelle = :Zeit)
+
+AOI_test_df |> typeof
+AOI_dict |> typeof
+
+AOI_dict
+AOI_group = groupby(AOI_df,:Gruppe)
+
+AOI_testdict = erstelle_teile_aus_gruppe(AOI_group)
+
+liste_regressionsmodelle(AOI_testdict["VAG01e"])
+
+test = bayes_regression!(AOI_testdict)
+
+liste_regressionsmodelle(AOI_testdict["VAG01e"])
+
+@save "AOI_Gruppen_Bayes.jld2" AOI_testdict
+
+keys(AOI_testdict)
+AOI_testdict["VAG01e"].RegressionsModell["Bayes"].Diagnostik |> vscodedisplay
+
+
+AOI_residuen = bayes_residuen(AOI_Teile_df, :Zeit, :rMenge, :Gruppe, AOI_bayes;
+                              mitnehmen = [:MA, :Arbeiter, :RMNr])
+
+vscodedisplay(bayes_abdeckung(AOI_residuen; ν = AOI_bayes.ν))
+
+Diagnosen_sammeln(AOI_testdict)
+
+test = spalte_gruppe_in_teile(AOI_testdict; meta = Teiledict)
+@save "AOI_Gruppen_gespalten_Bayes.jld2" test
+
+test["OI-VAG01e-A-01"].RegressionsModell["Bayes"].Diagnostik
+test["OI-VAG01e-A-01"].Gruppe
+
+function Diagnostik_sammeln(teiledict::Dict{String,Teil},Regression::String="Bayes")
+    dfs = Vector{DataFrame}(undef,length(teiledict))
+
+    for (i,(key,teil)) in enumerate(teiledict)
+        reg = teil.RegressionsModell
+        if haskey(reg,Regression)
+            reg = reg[Regression]
+            m = round(reg.stats.m[1], digits = 2)
+            m_lo = round(reg.stats.m_lo[1], digits = 2)
+            m_hi = round(reg.stats.m_hi[1], digits = 2)
+            n = round(reg.stats.n[1]/60, digits = 2)
+            n_lo = round(reg.stats.a_lo[1]/60, digits = 2) # inkonstistenz Intercept ist bei bayes als a bezeichnet statt als n
+            n_hi = round(reg.stats.a_hi[1]/60, digits = 2)
+            Einstufung = reg.Diagnostik.Stufe[1]
+        else
+            trow(ArgumentError("Die Regression : $(Regression) ist in $(teil.name) nicht vorhanden."))
+        end
+        dfs[i] = DataFrame( :Gruppe => teil.Gruppe,
+                            :Teil => teil.name,
+                            :Einschätzung => Einstufung,
+                            :soll_tr_min => round(teil.Soll_tr / 60, digits = 2),
+                            :tr_low => n_lo,
+                            :tr_mid => n,
+                            :tr_hi => n_hi,
+                            :real_tr => round(n/(teil.Soll_tr/60), digits = 4),
+                            :soll_te_sek => round(teil.Soll_te, digits = 4),
+                            :te_low => m_lo,
+                            :te_mid => m,
+                            :te_hi => m_hi,
+                            :real_te => round(m/teil.Soll_te, digits = 4)
+                            )
+    end
+    return vcat(dfs...)
+end
+
+Result = Diagnostik_sammeln(test)
+
+sort!(Result, [:Gruppe, order(:Teil)]) # Sortieren mit Numerbeachtung
+
+using XLSX
+
+save("test.xlsx", Result)
+
+Plot_Teil(test["OI-VAG01e-A-01"])
+test["OI-VAG01e-A-01"].Bezeichnung
+
+speichere_result_excel(Result, "Result.xlsx")

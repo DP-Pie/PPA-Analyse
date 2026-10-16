@@ -558,9 +558,29 @@ function Plot_Bayes_Residuen(residuen::AbstractDataFrame;
     return fig
 end
 
+# /////////////////////////////////////////////////////
+# ToDo: 
+# Metadaten in eine Zeile
+# Soll Linie einfügen
+# Punkte des Teils hervorheben. 
+# /////////////////////////////////////////////////////
+
 function Plot_Teil(teil::Teil,Regression::String= "Theil-Sen")
     fig = Figure(size = (1600,1000))
     Label(fig[0,1:4], teil.name, fontsize = 20, tellwidth = false)
+
+    # Meta-Daten als Gridlayout, rechts neben dem Titel (Zeile 0, Spalten 5-7)
+    meta = GridLayout(fig[0, 5:7])
+    meta[1, 1:3] = Label(fig, "Metadaten", font = :bold)
+    meta[2, 1:3] = Label(fig, "Bezeichnung: " * teil.Bezeichnung)
+    meta[3, 1] = Label(fig, "TA: " * string(teil.TA))
+    meta[3, 2] = Label(fig, "Gruppe: " * teil.Gruppe)
+    meta[3, 3] = Label(fig, "soll te: " * string(round(teil.Soll_te, digits = 2)) * " s")
+    meta[4, 1] = Label(fig, "Zustand: " * (teil.Zustand ? "aktiv" : "inaktiv"))
+    meta[4, 2] = Label(fig, "Aktivität: " * teil.Aktivität)
+    meta[4, 3] = Label(fig, "soll tr: " * string(round(teil.Soll_tr, digits = 2)) * " s")
+
+
     ax = Axis(fig[1:6,1:4],title = "Messpunkte und Regressionen", xlabel = "Rückmeldemenge", ylabel ="Gesamtzeit [s]")
 
     ok_df = filter(:Ausreißer => a -> a == "OK", teil.df)
